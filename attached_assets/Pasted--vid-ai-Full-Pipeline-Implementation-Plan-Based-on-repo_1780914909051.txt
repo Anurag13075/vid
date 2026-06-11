@@ -1,0 +1,420 @@
+# vid-ai — Full Pipeline Implementation Plan
+
+> Based on repo audit: TanStack Start + React 18 + TypeScript frontend, Supabase auth/db, Bun runtime, Vite, Tailwind + Framer Motion. Frontend shell (landing, auth, topic input, editor mock) is complete. Everything below is what remains to be built.
+
+---
+
+## What's Already Done
+
+- Landing page with all sections (hero, pricing, FAQ)
+- Google OAuth via Supabase
+- Topic input UI component
+- Studio editor UI (mock only)
+- Routing via TanStack Router
+- Tailwind + Framer Motion animations
+
+## What Needs to Be Built
+
+Everything in the actual pipeline: script generation, voiceover, footage sourcing, assembly, export, job management, and the real editor wiring.
+
+---
+
+## Phase 1 — Database Schema (Supabase)
+
+Before touching any pipeline code, the data model needs to be locked. Everything else hangs off this.
+
+### Tables
+
+**videos**
+- id, user_id, title, status (queued / scripting / voicing / footage / assembling / done / failed), created_at, updated_at, output_url, thumbnail_url, duration_seconds, error_message
+
+**video_sections**
+- id, video_id, order_index, narration_text, visual_keywords (text array), section_type (broll / stat / graphic / intro / outro), key_point (nullable — triggers lower third), duration_ms
+
+**video_assets**
+- id, video_id, section_id, asset_type (footage / music / sfx / motion_graphic / lower_third), source (storyblocks / pexels / pixabay), external_id, local_path, duration_ms, license_confirmed (bool)
+
+**render_jobs**
+- id, video_id, stage, started_at, completed_at, error, retries
+
+### RLS Policies
+- Users can only read/write their own videos and assets
+- Service role has full access for server-side pipeline operations
+
+---
+
+## Phase 2 — Server Architecture
+
+The existing `/server` folder needs to be structured as a proper pipeline engine.
+
+### Folder Structure
+
+```
+server/
+  index.ts               ← Express app entry, existing
+  routes/
+    videos.ts            ← REST endpoints for video CRUD
+    pipeline.ts          ← Trigger and status endpoints
+  pipeline/
+    orchestrator.ts      ← Main job runner, calls each stage in sequence
+    scriptGenerator.ts   ← Claude integration
+    voiceover.ts         ← MiniMax TTS
+    footageAgent.ts      ← Storyblocks + fallbacks
+    assembler.ts         ← FFmpeg composition
+    exporter.ts          ← Final render + upload to storage
+  lib/
+    supabase.ts          ← Server-side Supabase client (service key)
+    ffmpeg.ts            ← FFmpeg wrapper helpers
+    storyblocks.ts       ← Storyblocks API client
+    pexels.ts            ← Pexels API client
+    pixabay.ts           ← Pixabay API client
+    minimax.ts           ← MiniMax TTS client
+    claude.ts            ← Anthropic SDK client
+  types/
+    pipeline.ts          ← All shared TypeScript types
+  jobs/
+    queue.ts             ← Simple in-process job queue (BullMQ later if scale needed)
+```
+
+### API Endpoints
+
+**POST /api/videos** — create a new video record, return id, kick off pipeline  
+**GET /api/videos/:id** — get video + current status  
+**GET /api/videos/:id/sections** — get all sections with assets  
+**GET /api/videos** — list user's videos  
+**DELETE /api/videos/:id** — delete video + cleanup assets  
+**GET /api/pipeline/:id/status** — SSE stream for real-time status updates to frontend  
+
+---
+
+## Phase 3 — Script Generator
+
+### What It Does
+Takes the video title, calls Claude, returns a structured JSON object that drives every downstream stage. This is the most important module — the quality of the JSON schema directly determines the quality of the final video.
+
+### Claude Prompt Strategy
+- System prompt: you are a professional YouTube documentary scriptwriter
+- Instruct Claude to write in a narrative, engaging voice — not listicle unless the title calls for it
+- Script should have a strong hook in the first 30 seconds, clear section breaks, and a CTA outro
+- Claude must return pure JSON, no markdown, no preamble
+
+### Output Schema Claude Must Return
+
+Each video is broken into sections. Each section has:
+- A narration string (what gets read aloud)
+- An array of visual search keywords specific to that line — not the general topic
+- A section type: broll, stat, graphic, intro, outro
+- An optional key_point string — present only when this section deserves a lower third overlay
+- An estimated word count so voiceover duration can be predicted
+
+### Section Type Rules Claude Must Follow
+- If the narration contains a number, percentage, dollar figure, or measurable claim → section_type is "stat"
+- If the narration is the opening hook → section_type is "intro"
+- If it's the final CTA → section_type is "outro"
+- Everything else → "broll"
+- "graphic" is reserved for pure motion graphic moments (no narration, visual transition only) — Claude should insert 1–2 of these at natural breaks in long videos
+
+### Visual Keywords Rule
+This is the critical difference from naive implementations. Keywords must describe the specific visual, not the topic. For example: if narration says "Tesla's stock dropped 40% in a single trading session", keywords should be ["stock market trading floor", "red stock chart declining", "wall street traders worried"] — not just ["Tesla", "stocks"].
+
+### Target Length by Duration
+- 8–10 min video → 18–22 sections
+- 12–15 min video → 26–32 sections
+- 20+ min video → 40–50 sections
+
+---
+
+## Phase 4 — Voiceover (MiniMax)
+
+### What It Does
+Takes each section's narration text, calls MiniMax T2A API, saves audio file per section, returns duration.
+
+### Important Details
+- Generate per-section, not the whole script at once — this enables section-level retries and editing later
+- Save files as `audio/{video_id}/{section_id}.mp3`
+- Record exact `duration_ms` per section — assembler depends on this for clip timing
+- MiniMax voice: use a consistent voice ID per video (store on video record). Don't switch voices mid-video.
+- Handle MiniMax rate limits — add retry with exponential backoff
+
+### Voice Selection
+Expose a small selection of MiniMax voices to the user in the UI before generation starts. Store chosen voice_id on the video record. Default to the most neutral documentary-style voice.
+
+---
+
+## Phase 5 — Footage Agent
+
+This is the most complex module. It has to handle sourcing, deduplication, fallback, and type-aware searching.
+
+### Deduplication Strategy
+- Maintain a `usedClipIds: Set<string>` scoped to the entire video render job
+- Before accepting any clip, check if its external_id is in the set
+- If it is, skip and request next result from the same API
+- After accepting, add to set and persist to `video_assets` table
+
+### Per-Section Logic
+
+**For section_type = "broll"**
+1. Search Storyblocks footage with visualKeywords
+2. Filter results: minimum 1080p, duration ≥ 8 seconds, not in usedClipIds
+3. If Storyblocks returns nothing usable → try Pexels with same keywords
+4. If Pexels fails → try Pixabay
+5. If all fail → flag section as missing_footage, assembler will use extended clip from adjacent section
+
+**For section_type = "stat"**
+1. Search Storyblocks motion graphics collection — not footage
+2. Keywords should emphasize: "data visualization", "statistics animation", "infographic"
+3. If no motion graphic found → fall back to a relevant broll clip (stat section still gets text overlay from assembler)
+
+**For section_type = "graphic"**
+1. Pull from Storyblocks transitions/motion graphics collection
+2. These are typically 2–4 second clips, no narration
+3. Look for clean, minimal graphics that match the video's overall color grade
+
+### Storyblocks API Notes
+- Storyblocks uses HMAC-SHA256 request signing: every request needs a signature built from project_id + private_key + unix_timestamp
+- Endpoints needed: footage search, motion graphics search, music search, SFX search, download
+- Downloads return a time-limited URL — download immediately and store locally, don't store the URL
+- All Storyblocks assets are under their Unlimited license — safe for commercial/monetized YouTube
+
+### Pexels / Pixabay Notes
+- Both have free tiers with generous limits
+- Both allow commercial use with attribution (attribution in video description is fine)
+- Pexels API is cleaner and preferred as first fallback
+- Pixabay is second fallback
+
+### Music Selection
+- Done once per video, not per section
+- Search Storyblocks music with mood keywords derived from the video title (Claude can return a `mood` field in the script JSON: "dramatic", "uplifting", "neutral", "tense")
+- Pick one track for the whole video — consistency matters more than variety here
+- Store music file path on video record
+
+### SFX
+- Only for sections where Claude tags `sfx: true` in the JSON (whooshes on transitions, subtle hits on stat reveals)
+- Search Storyblocks SFX collection per-tag
+- Keep a separate usedSfxIds set
+
+---
+
+## Phase 6 — FFmpeg Assembler
+
+This is the most FFmpeg-heavy module. It takes all the audio files and footage clips and produces a single MP4.
+
+### Assembly Order of Operations
+
+1. For each section, trim or loop the footage clip to match voiceover duration + 0.5s buffer
+2. Apply Ken Burns zoom/pan every 6 seconds within each clip
+3. Apply xfade transition between every pair of adjacent clips
+4. Overlay narration audio on the video timeline
+5. For stat sections: overlay motion graphic or text animation on top of footage
+6. For sections with key_point: burn in lower third overlay
+7. Mix BGM bed under narration (narration at 0dB, BGM at -12dB when narration playing, -3dB in intro/outro)
+8. Apply SFX at tagged timestamps
+9. Apply color LUT globally as final video filter
+10. Final encode to H.264
+
+### Zoom/Pan (Ken Burns) Logic
+- Every clip is divided into 6-second chunks
+- Each chunk gets a slightly different zoom direction (zoom in, zoom out, pan left, pan right — alternated)
+- This creates constant visual motion without cuts, maintaining retention in longer clips
+- Parameters: zoom range 1.0 to 1.08, slow and smooth, not jarring
+
+### Transitions
+- Use xfade filter between clips
+- Approved transition types: fade, slideleft, slideright, wipeleft, wiperight
+- Duration: 0.5 seconds
+- Randomize from approved list — don't use the same transition twice in a row
+
+### Stat Section Overlay
+- If section has a motion graphic clip: use it as the primary visual (replace broll)
+- If falling back to broll: overlay a text animation using FFmpeg drawtext with animated opacity
+- Text should show the key statistic in large, bold type — centered, white text, dark semi-transparent background
+
+### Lower Thirds
+- Trigger: section has a non-null key_point value
+- Show at second 1.5 of the section (after narration has started)
+- Duration: 3.5 seconds
+- Style: left-aligned bar, white text, brand color accent — built as FFmpeg drawtext overlay or pre-rendered PNG overlay
+- Fade in over 0.3s, hold, fade out over 0.3s
+
+### Color Grade
+- Apply a single LUT file to all footage for consistency
+- Recommended: a warm, slightly desaturated documentary LUT
+- Applied as the last video filter before encode
+- Store the LUT file in `server/assets/luts/`
+
+### Audio Mix
+- All narration sections concatenated on audio track 1
+- BGM on audio track 2, ducked during narration using FFmpeg's `sidechaincompress` or manual volume envelopes
+- SFX on audio track 3, mixed in at appropriate timestamps
+- Final mix normalized to -14 LUFS (YouTube recommended loudness)
+
+### Output Spec
+- Resolution: 1920x1080
+- Codec: H.264 (libx264), High profile
+- Pixel format: yuv420p (required for YouTube compatibility)
+- Audio: AAC 192kbps, 48kHz stereo
+- Container: MP4
+- Bitrate: 8–12 Mbps for 1080p
+
+---
+
+## Phase 7 — Orchestrator & Job Queue
+
+### Orchestrator Flow
+The orchestrator calls each pipeline stage sequentially and updates the video status in Supabase at each step. If any stage fails, it updates status to "failed" with an error message and stops.
+
+Stage order:
+1. Set status → "scripting", call scriptGenerator, save sections to DB
+2. Set status → "voicing", call voiceover for each section, save audio paths
+3. Set status → "footage", call footageAgent for each section, save asset records
+4. Set status → "assembling", call assembler, produce intermediate files
+5. Set status → "exporting", call exporter, upload final MP4 to Supabase Storage
+6. Set status → "done", save output_url and thumbnail_url
+
+### Job Queue
+For MVP, a simple in-process queue is fine (videos processed one at a time per server instance). Structure it as a proper queue class so BullMQ can be swapped in later without rewriting the orchestrator.
+
+### Retry Logic
+- Each stage gets 3 retry attempts before the job is marked failed
+- Retries use exponential backoff: 5s, 15s, 45s
+- Footage stage retries are per-section, not per-video (one missing clip shouldn't kill the whole job)
+
+### Real-time Status via SSE
+- Frontend subscribes to `/api/pipeline/:id/status`
+- Server sends SSE events at each stage transition
+- Event payload: `{ stage, progress_pct, message }`
+- Frontend updates the editor UI in real time to show which stage is running
+
+---
+
+## Phase 8 — Storage
+
+### File Organization (Supabase Storage buckets)
+
+**bucket: vid-ai-temp**
+- `/audio/{video_id}/{section_id}.mp3` — per-section voiceover
+- `/footage/{video_id}/{section_id}_{clip_id}.mp4` — downloaded clips
+- `/music/{video_id}/bgm.mp3`
+- `/sfx/{video_id}/{section_id}_sfx.mp3`
+- Cleaned up after successful render
+
+**bucket: vid-ai-outputs**
+- `/videos/{video_id}/final.mp4` — the output
+- `/thumbnails/{video_id}/thumb.jpg`
+- These are permanent until user deletes
+
+### Cleanup Job
+After a video reaches "done" status, schedule a cleanup of all temp files for that video_id after 24 hours. This keeps storage costs low.
+
+---
+
+## Phase 9 — Thumbnail Generation
+
+Simple but important for YouTube upload flow.
+
+### Approach
+- Extract frame at timestamp 8s from the final video using FFmpeg
+- Overlay video title text (large, bold) with a dark gradient background
+- Optionally: let Claude suggest a thumbnail concept (hook phrase + color) during script generation
+- Save to Supabase Storage and record thumbnail_url on video record
+
+---
+
+## Phase 10 — Frontend Wiring
+
+The editor UI mock needs to become real.
+
+### Video Creation Flow
+1. User enters title on TopicInput
+2. POST /api/videos → receives video_id
+3. Frontend redirects to `/studio/{video_id}`
+4. Studio page subscribes to SSE for real-time status
+5. Progress UI shows current stage with animated indicator
+
+### Studio Editor (Post-Generation)
+Once the video is done:
+- Show video player with the final MP4
+- Show section list on the left — each section shows narration text + current footage thumbnail
+- User can click a section to replace its footage clip (triggers a new footage search)
+- User can edit narration text and re-generate just that section's voiceover
+- Download button → direct link to Supabase Storage output URL
+
+### Dashboard
+- List of all user's videos with status badges
+- Estimated time remaining for in-progress renders
+- Storage used indicator
+
+---
+
+## Phase 11 — Environment Variables Needed
+
+Server-side:
+- ANTHROPIC_API_KEY
+- MINIMAX_API_KEY
+- MINIMAX_GROUP_ID
+- STORYBLOCKS_PROJECT_ID
+- STORYBLOCKS_PRIVATE_KEY
+- PEXELS_API_KEY
+- PIXABAY_API_KEY
+- SUPABASE_URL
+- SUPABASE_SERVICE_KEY
+- STORAGE_TEMP_BUCKET
+- STORAGE_OUTPUT_BUCKET
+- FFMPEG_PATH (if not in system PATH)
+- PORT
+
+Client-side (already in repo):
+- VITE_SUPABASE_URL
+- VITE_SUPABASE_ANON_KEY
+
+---
+
+## Phase 12 — Billing & Limits
+
+Since the README shows Stripe in the roadmap:
+
+### Usage Tracking
+- Track per-user: videos generated this month, total minutes of video produced
+- Store on a `user_usage` table updated at end of each render
+
+### Plan Limits
+Enforce in the orchestrator before starting a job:
+- Free: 0 videos (waitlist only, matches current VidRush model)
+- Starter: X videos/month, max Y minutes per video
+- Pro: higher limits, priority queue
+
+### Stripe Integration
+- Webhook on subscription created/cancelled → update user plan in Supabase
+- Check plan limits before accepting a render job
+- Return 402 with clear error message if limit hit
+
+---
+
+## Build Order (Recommended Sequence)
+
+1. Supabase schema (Phase 1) — do this first, everything depends on it
+2. Server folder structure + types (Phase 2) — establish the skeleton
+3. Script generator (Phase 3) — nail the JSON schema, test it with 5–6 different titles
+4. Voiceover (Phase 4) — straightforward once you have section data
+5. Footage agent — Storyblocks only first, add fallbacks after (Phase 5)
+6. Basic assembler — get clips + narration stitching working before adding transitions, zooms, overlays (Phase 6)
+7. Orchestrator + SSE (Phase 7) — wire it all together
+8. Storage + cleanup (Phase 8)
+9. Frontend wiring — replace mocks with real data (Phase 10)
+10. Thumbnail (Phase 9)
+11. Advanced assembler features — Ken Burns, lower thirds, color grade, SFX (Phase 6 revisited)
+12. Billing (Phase 12) — last, only needed before public launch
+
+---
+
+## Key Risk Areas
+
+**Storyblocks API access** — this is the biggest blocker. Regular Storyblocks subscriptions don't include API access. The client needs to confirm they have an API-enabled plan or negotiate with Storyblocks. Without this, the whole footage strategy needs to be rethought.
+
+**FFmpeg complexity** — the assembler will take the longest to get right. Zoom/pan + transitions + overlays + audio mixing + LUT all in a single FFmpeg filter graph is genuinely hard. Build and test each filter in isolation first, then compose.
+
+**Render time** — a 10-minute video could take 15–30 minutes to render depending on server specs. Set user expectations clearly in the UI. Consider moving to a dedicated render server (Fly.io, Railway) separate from the API server.
+
+**MiniMax voiceover quality** — test multiple MiniMax voices on documentary-style narration before committing. If quality isn't good enough, ElevenLabs is the obvious swap (higher cost but noticeably better).
+
+**Clip deduplication at scale** — if a user generates many videos on the same topic, Storyblocks may run out of non-repeated clips. Future solution: track used clip IDs per user across all videos, not just per render job.

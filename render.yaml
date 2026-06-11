@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: vidrush
+    runtime: node
+    plan: free
+    buildCommand: bun install && bun run build
+    startCommand: bun server/prod.ts
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vidrush-db
+          property: connectionString
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MINIMAX_API_KEY
+        sync: false
+      - key: MINIMAX_GROUP_ID
+        sync: false
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: PIXABAY_API_KEY
+        sync: false
+
+databases:
+  - name: vidrush-db
+    plan: free
+    databaseName: vidrush

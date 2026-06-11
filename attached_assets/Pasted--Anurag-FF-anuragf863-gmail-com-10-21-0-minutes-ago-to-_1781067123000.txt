@@ -1,0 +1,71 @@
+
+Anurag FF <anuragf863@gmail.com>
+10:21 (0 minutes ago)
+to me
+
+hey bro, here's the full spec. this is everything you need to know:
+
+WHAT WE'RE BUILDING
+an automated video production pipeline. i give it a title, it outputs a finished MP4 ready to upload to YouTube. no manual steps.
+
+TARGET AUDIENCE
+65+ americans. content niches: health, homesteading, forgotten knowledge, history, science, finance. the pipeline must work for ANY of these niches.
+
+PIPELINE FLOW
+title -> script (Claude) -> audio (MiniMax) -> footage + assembly (FFmpeg) -> finished MP4
+
+SCRIPTS
+- Claude via PiAPI if it works fine, otherwise use Anthropic direct (i gave you both keys)
+- target length: 20 minute videos
+- for the demo shorter is fine, whatever works
+
+AUDIO
+- MiniMax speech-02-hd, calm male voice (i already gave you the key)
+
+FOOTAGE
+- for the demo: Pexels API, Pixabay API, Unsplash API (all free)
+- for final version i'll add Storyblocks API ($65/mo) - bigger library, better quality, what Vidrush uses
+- use video clips when available, images as fallback with Ken Burns effect
+- footage must match the SPECIFIC narration line being spoken, not just the general topic
+- never repeat the same clip or image within one video
+
+EDITING (via FFmpeg) - critical for avoiding YouTube AI detection
+- visual change every 5-6 seconds max
+- Ken Burns effect on images (slow zoom, randomize direction every time)
+- smooth crossfade transitions
+- auto-generated captions synced to audio
+- text overlays for key stats and numbers
+- consistent warm color grade (earthy tones, documentary feel)
+- background music at low volume
+- zoom/pan on video clips
+- NO repeated clips or images
+- vary the editing rhythm - not every cut the same length
+- output: 1920x1080 MP4
+
+SCRIPT QUALITY - also critical for YouTube AI detection
+- must sound like a real human narrator, not AI
+- no transition words like: furthermore, moreover, in conclusion, thus, hence
+- no buzzwords like: delve, crucial, comprehensive, robust, paradigm, leverage, transformative
+- no filler phrases like: in today's world, at the end of the day, it goes without saying
+- conversational language, short sentences, direct opinions
+- specific names, dates and numbers always
+- feels like a PBS documentary narrator
+
+QUALITY BAR
+PBS documentary level. not cheap AI slop. YouTube demonetizes channels that look mass-produced and repetitive. the editing variety and script quality are what keep channels safe.
+
+FOR THE DEMO
+title: '25 Forgotten Home Remedies From the 1960s That Actually Work'
+length: whatever works for the demo, final target is 20 min
+show me full pipeline end to end
+
+BIGGER PICTURE
+once video pipeline works, we expand into full management app:
+- thumbnail generation
+- SEO title, description, tags
+- 50 channel management
+- niche research and competitor tracking
+
+video pipeline is phase 1. if this works i want to build everything with you.
+
+pay: once demo looks good we discuss proper payment for the full b

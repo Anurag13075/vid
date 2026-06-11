@@ -1,0 +1,38 @@
+The existing frontend looks clean and polished. Every new UI piece added during pipeline wiring must match it exactly.
+
+Golden Rules
+
+Never touch these existing files unless the only change is wiring real data in: landing page components, auth pages, any component already visually complete, global CSS / Tailwind config / font imports, Framer Motion animation configs already in place. If a file already has styling, extend it — never rewrite from scratch.
+
+When Adding New Components
+
+Use only Tailwind classes and color tokens already present in the codebase — no new colors, no hardcoded hex values. Match existing border-radius, spacing scale, and shadow style. Framer Motion: same easing curves, similar duration ranges, same style as existing animations. Typography: match existing font weights, sizes, line heights exactly. Icons: use whatever icon library is already in the project, don't add a second one.
+
+Component-Specific Rules
+
+Progress/status UI must feel native to the existing studio UI — same card style, border, background. Stage indicators should be subtle: small dot or thin progress bar, not a giant spinner. Error states must match any existing error UI in tone and color.
+
+Section list in the studio editor must match the visual rhythm of the existing mock exactly — don't change padding, gap, or card sizing. Footage thumbnails inside section cards: fixed 16:9 ratio, never stretch or overflow.
+
+Video player: native HTML5 element styled to the dark editor theme, no third-party player libraries unless already in the project.
+
+Dashboard status badges: small, pill-shaped, color-coded using only existing Tailwind config colors. Never show raw status strings — map them to friendly labels: "Generating script", "Creating voiceover", "Finding footage", "Rendering", "Ready".
+
+Modals: if a modal component already exists, use it. Backdrop blur, padding, border style must match existing modals exactly.
+
+Loading States
+
+Skeleton loaders for content areas — match the shape of the content they replace. Inline spinners only for button actions — replace button text, keep same button size. Never show a blank white flash.
+
+Animations
+
+Leave all existing Framer Motion animations exactly as they are. For new components, only these patterns are allowed: fade in on mount (opacity 0→1, 200–300ms), subtle slide up on mount (y: 8→0 with fade, 250ms), scale on hover for interactive cards (scale 1→1.02, 150ms). Nothing else — no bounces, no complex sequences.
+
+CSS Rules
+
+No inline styles except for truly dynamic values like a progress bar width. No !important. No overriding Tailwind base styles globally. If a pattern is needed more than twice, make it a component.
+
+Pre-Commit Checklist
+
+Before every frontend commit ask: does it look identical to the design at 1280px? Did I accidentally change any existing component's layout or spacing? Are all strings user-friendly with no raw API values or camelCase exposed? Do loading states follow the skeleton/spinner convention? Does it work on mobile? Did I introduce any new color, font, or animation not already in the project?
+

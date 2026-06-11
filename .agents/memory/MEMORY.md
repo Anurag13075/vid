@@ -1,0 +1,7 @@
+- [FFmpeg audio mixing](ffmpeg-audio-mix.md) — never use `apad` in audio filter graphs; use `-shortest` flag instead to avoid infinite stream hangs
+- [Bun EMFILE fix](bun-emfile-fix.md) — Bun hits EMFILE when cache grows large; fix by clearing `.cache/.bun` and running via `bun run dev:frontend` (not concurrently)
+- [Dual workflow setup](dual-workflow.md) — Vite (port 5000, webview) and Express API (port 3001, console) must be separate workflows; concurrently inside one workflow causes EMFILE + getifaddrs crash
+- [VidRush stack](vidrush-stack.md) — free pipeline: Groq Llama 3.3 70B script, edge-tts voiceover, Pexels+Pixabay footage, FFmpeg assembly, PostgreSQL state
+- [edge-tts voices](edge-tts-voices.md) — only a subset of voices exist; DavisNeural/SoniaNeural are NOT available; always validate against live voice list.
+- [FFmpeg drawbox variables](ffmpeg-drawbox-vars.md) — in drawbox filter, use `ih`/`iw` for video dimensions; `h`/`w` mean the box's own dimensions and cause expression errors.
+- [Unified prod server](unified-prod-server.md) — server/prod.ts bridges Express API + Nitro SSR fetch handler into ONE process on port 5000; use regex route `app.all(/.*/, ...)` not `"*"` (path-to-regexp v8 breaks wildcard strings).
