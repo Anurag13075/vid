@@ -1,9 +1,9 @@
 [build]
 builder = "nixpacks"
-buildCommand = "bun install && bun run build"
+buildCommand = "pnpm install --frozen-lockfile && pnpm run build"
 
 [deploy]
-startCommand = "bun server/prod.ts"
+startCommand = "tsx server/prod.ts"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
