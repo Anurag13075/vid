@@ -3,7 +3,7 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover } from "./voiceover.js";
-import { findMultipleFootage, downloadClip, createClipTracker } from "./footageAgent.js";
+
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
 
