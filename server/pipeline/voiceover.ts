@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { promises as fs } from "fs";
+import { promises as fs, existsSync } from "fs";
 import path from "path";
 import type { ScriptSection } from "./types.js";
 
@@ -50,6 +50,27 @@ function resolveEdgeVoice(voiceId: string): string {
 // edge-tts is installed as a Python CLI on Railway (pip install edge-tts).
 // We call it as a child process so we stay in pure Node/TS with no Python SDK.
 
+// Resolve the edge-tts binary path: check .pythonlibs/bin first (Replit),
+// then fall back to whatever is on PATH (Railway, local, etc.)
+function getEdgeTtsBin(): string {
+  const candidates = [
+    "/home/runner/workspace/.pythonlibs/bin/edge-tts",
+    "/home/runner/.pythonlibs/bin/edge-tts",
+    "edge-tts",
+  ];
+  for (const bin of candidates) {
+    try {
+      // If the path contains a slash it's absolute — trust it exists if /home/runner/workspace is present
+      if (!bin.includes("/")) return bin; // fall through to PATH lookup
+      if (!existsSync(bin)) throw new Error("not found");
+      return bin;
+    } catch {
+      // not found at this path, try next
+    }
+  }
+  return "edge-tts"; // last resort — rely on PATH
+}
+
 async function generateEdgeTTS(
   text: string,
   edgeVoice: string,
@@ -57,14 +78,22 @@ async function generateEdgeTTS(
 ): Promise<void> {
   // edge-tts writes MP3 directly; no intermediate conversion needed.
   return new Promise((resolve, reject) => {
-    // Timeout: 2 min — same as the old MiniMax timeout
-    const TIMEOUT_MS = 120_000;
+    // Timeout: 90s per section — generous enough for long narrations
+    const TIMEOUT_MS = 90_000;
 
-    const proc = spawn("edge-tts", [
+    const edgeBin = getEdgeTtsBin();
+
+    // Extend PATH so edge-tts can find its own Python deps
+    const env = {
+      ...process.env,
+      PATH: `/home/runner/workspace/.pythonlibs/bin:/home/runner/.pythonlibs/bin:${process.env.PATH ?? ""}`,
+    };
+
+    const proc = spawn(edgeBin, [
       "--voice", edgeVoice,
       "--text", text,
       "--write-media", outputPath,
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+    ], { stdio: ["ignore", "ignore", "pipe"], env });
 
     let stderr = "";
     proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
