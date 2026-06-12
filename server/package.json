@@ -5,10 +5,10 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "dev": "bun run index.ts",
+    "dev": "tsx index.ts",
     "build": "tsc",
-    "start": "node index.js",
-     "postinstall": "pip install edge-tts || pip3 install edge-tts || true"
+    "start": "node index.js"
+    
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",
