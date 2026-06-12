@@ -4,13 +4,9 @@
   "sideEffects": false,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n VITE,API -c cyan,magenta \"vite dev\" \"tsx server/index.ts\"",
-    "dev:frontend": "vite dev",
-    "dev:api": "tsx server/index.ts",
+    "dev": "concurrently \"vite dev\" \"tsx server/index.ts\"",
     "build": "vite build",
-    "build:dev": "vite build --mode development",
-    "preview": "vite preview",
-    "start": "bun server/prod.ts",
+    "start": "tsx server/prod.ts",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
