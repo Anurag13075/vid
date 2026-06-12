@@ -1,8 +1,12 @@
+import { createFileRoute, Link } from '@tanstack/react-router'
 import {
   ChevronLeft, Play, Heart, Check, Search, Loader2,
   Mic2, Palette, Image as ImageIcon, Clock, Square,
 } from "lucide-react";
-import { z } from "zod";
+import { z } from "zod"; 
+import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from '@tanstack/react-router'
+import { Logo } from '../components/Logo'
 
 const searchSchema = z.object({
   topic: z.string().default(""),
