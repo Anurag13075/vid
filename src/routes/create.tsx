@@ -147,16 +147,22 @@ async function createJob(params: {
   const res = await fetch('/api/videos', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      title: params.topic,
+      voice: params.voice,
+      length: params.length,
+      theme: params.theme,
+      background: params.background,
+      mode: params.mode,
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || `Server error: ${res.status}`);
+    throw new Error(err.error || `Server error: ${res.status}`);
   }
   const data = await res.json();
-  return data.videoId ?? data.id;
+  return data.id;
 }
-
 function CreateWizard() {
   const { topic, length, mode } = Route.useSearch();
   const navigate = useNavigate();
