@@ -3,6 +3,6 @@ nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg", "python311", "python311Pa
 
 [phases.install]
 cmds = [
-  "pip install edge-tts",
+  "pip install edge-tts --break-system-packages",
   "pnpm i --frozen-lockfile"
 ]
