@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["nodejs_22", "nodePackages.pnpm"]
+nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg"]
 
 [phases.build]
 cmds = ["pnpm install --frozen-lockfile && pnpm run build"]

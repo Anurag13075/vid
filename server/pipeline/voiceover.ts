@@ -20,7 +20,6 @@ export const VOICES = [
 ];
 
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY || "";
-const MINIMAX_GROUP_ID = process.env.MINIMAX_GROUP_ID || "";
 
 async function generateMinimaxTTS(
   text: string,
@@ -28,10 +27,11 @@ async function generateMinimaxTTS(
   outputPath: string
 ): Promise<void> {
   if (!MINIMAX_API_KEY) {
-    throw new Error("MINIMAX_API_KEY is required. Set it in Secrets.");
+    throw new Error("MINIMAX_API_KEY is required. Set it in Railway Variables.");
   }
 
-  const url = `https://api.minimaxi.chat/v1/t2a_v2`;
+  // Use global/western endpoint — no Group ID required
+  const url = `https://api-uw.minimax.io/v1/t2a_v2`;
 
   const body = {
     model: "speech-02-hd",
@@ -79,13 +79,11 @@ async function generateMinimaxTTS(
       data?: { audio?: string };
     };
 
-    // Check for API-level errors
     if (data.base_resp && data.base_resp.status_code !== 0) {
       throw new Error(`MiniMax TTS error: ${data.base_resp.status_msg} (code ${data.base_resp.status_code})`);
     }
 
-    // Extract base64 audio from response
-    const audioBase64 = (data as Record<string, unknown>).data 
+    const audioBase64 = (data as Record<string, unknown>).data
       ? ((data as Record<string, unknown>).data as Record<string, unknown>).audio as string
       : (data as Record<string, unknown>).audio_file as string;
 
@@ -122,7 +120,6 @@ export async function generateVoiceover(
     try {
       await generateMinimaxTTS(text, voice, audioPath);
 
-      // Guard: reject if output file is empty
       const stat = await fs.stat(audioPath).catch(() => null);
       if (!stat || stat.size < 100) {
         throw new Error(`MiniMax TTS produced no audio (file size: ${stat?.size ?? 0} bytes)`);
@@ -137,7 +134,6 @@ export async function generateVoiceover(
     }
   }
 
-  // Fallback to silence if all attempts fail
   console.error(`All MiniMax TTS attempts failed for section ${section.id}, using silence`);
   await generateSilence(audioPath, estimateDuration(text));
   const durationMs = await getAudioDurationMs(audioPath);
@@ -145,7 +141,6 @@ export async function generateVoiceover(
 }
 
 function estimateDuration(text: string): number {
-  // Average speaking rate ~150 words/min = 2.5 words/sec
   const words = text.split(/\s+/).length;
   return Math.round((words / 2.5) * 1000);
 }
