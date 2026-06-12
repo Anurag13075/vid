@@ -67,6 +67,7 @@ async function buildCut(
   );
 
   const filters: string[] = [
+    "fps=25",  
     "scale=1280:720:force_original_aspect_ratio=decrease",
     "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
     "format=yuv420p",
@@ -80,7 +81,6 @@ async function buildCut(
     "-i", clipPath,                     // ← no stream_loop (was causing null exit)
     "-vf", filters.join(","),
     "-t", String(Math.max(cutDuration, 0.5)),
-    "-r", "25",
     "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
     "-an", "-y", outPath,
   ]);
