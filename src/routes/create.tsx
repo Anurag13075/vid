@@ -7,6 +7,7 @@ import { z } from "zod";
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Logo } from '../components/Logo'
+import { createJob } from "@/lib/pipeline";
 
 const searchSchema = z.object({
   topic: z.string().default(""),
@@ -136,33 +137,7 @@ const BACKGROUNDS: BackgroundOption[] = [
 
 // ─── Wizard Component ─────────────────────────────────────────────────────────
 
-async function createJob(params: {
-  topic: string;
-  voice: string;
-  length: string;
-  theme: string;
-  background: string;
-  mode: string;
-}): Promise<string> {
-  const res = await fetch('/api/videos', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title: params.topic,
-      voice: params.voice,
-      length: params.length,
-      theme: params.theme,
-      background: params.background,
-      mode: params.mode,
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Server error: ${res.status}`);
-  }
-  const data = await res.json();
-  return data.id;
-}
+
 function CreateWizard() {
   const { topic, length, mode } = Route.useSearch();
   const navigate = useNavigate();
