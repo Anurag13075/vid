@@ -1,6 +1,6 @@
 [build]
 builder = "nixpacks"
-buildCommand = "pnpm install --frozen-lockfile && pnpm run build"
+buildCommand = "pip install edge-tts && pnpm install --frozen-lockfile && pnpm run build"
 
 [deploy]
 startCommand = "tsx server/prod.ts"
