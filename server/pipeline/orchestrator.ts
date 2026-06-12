@@ -146,11 +146,11 @@ async function runPipeline(videoId: string) {
     // Pre-initialize results array
     const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
 
-    // Hard cap per section: search (20s) + download 3 clips (20s each) = 45s max
-    const SECTION_HARD_CAP_MS = 45_000;
+    // Hard cap per section: search (20s) + download 3 clips (25s each) = ~35s max
+    const SECTION_HARD_CAP_MS = 35_000;
 
-    // Process in parallel batches of 3 to limit concurrent network pressure
-    const BATCH_SIZE = 3;
+    // Process in parallel batches of 2 to limit concurrent network pressure
+    const BATCH_SIZE = 2;
 
     for (let batchStart = 0; batchStart < script.sections.length; batchStart += BATCH_SIZE) {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, script.sections.length);
@@ -355,3 +355,4 @@ async function findBgm(mood: string): Promise<string | null> {
   }
   return null;
 }
+
