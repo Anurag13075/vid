@@ -1,6 +1,2 @@
 [phases.setup]
-nixPkgs = ["pnpm-9_x"]
-nixLibs = []
-
-[phases.install]
-cmds = ["pnpm i --frozen-lockfile"]
+nixPkgs = ["nodejs_22", "nodePackages.pnpm"]
