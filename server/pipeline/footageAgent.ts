@@ -35,9 +35,7 @@ interface PixabayVideo {
 
 // ── Query cleanup ─────────────────────────────────────────────────────────────
 function simplifyQuery(keyword: string): string {
-  // If a multi-keyword string slipped through, take only the first segment
   const first = keyword.split(/[·→\|\n]|\s{2,}/)[0].trim();
-
   return first
     .replace(/^motion graphic[:]\s*/i, "")
     .replace(/^cgi recreation[:]\s*/i, "")
@@ -60,8 +58,8 @@ function buildSearchQueries(keyword: string): string[] {
   return [base, `${base} cinematic`, `${base} footage`];
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), ms));
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  const timeout = new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms));
   return Promise.race([promise, timeout]);
 }
 
@@ -72,7 +70,10 @@ async function searchPexels(query: string, usedIds: Set<string>): Promise<Clip |
     const url =
       `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}` +
       `&per_page=15&orientation=landscape&size=large`;
-    const res = await fetch(url, { headers: { Authorization: PEXELS_KEY } });
+    const res = await fetch(url, {
+      headers: { Authorization: PEXELS_KEY },
+      signal: AbortSignal.timeout(8000),
+    });
     if (!res.ok) {
       console.warn(`Pexels non-OK (${res.status}) for: ${query}`);
       return null;
@@ -109,7 +110,9 @@ async function searchPixabay(query: string, usedIds: Set<string>): Promise<Clip 
     const url =
       `https://pixabay.com/api/videos/?key=${PIXABAY_KEY}` +
       `&q=${encodeURIComponent(query)}&video_type=film&per_page=15`;
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+    });
     if (!res.ok) {
       console.warn(`Pixabay non-OK (${res.status}) for: ${query}`);
       return null;
@@ -139,14 +142,16 @@ async function searchPixabay(query: string, usedIds: Set<string>): Promise<Clip 
   return null;
 }
 
-// ── Core clip finder (5s timeout per search, 3 query variants) ───────────────
+// ── Core clip finder — searches Pexels + Pixabay IN PARALLEL per query ────────
 async function findOneClip(keyword: string, usedIds: Set<string>): Promise<Clip | null> {
   const queries = buildSearchQueries(keyword);
   for (const query of queries) {
-    const clip = await withTimeout(
-      searchPexels(query, usedIds).then((c) => c || searchPixabay(query, usedIds)),
-      5000  // reduced from 8000
-    );
+    // Run both sources simultaneously instead of sequentially
+    const [pexels, pixabay] = await Promise.all([
+      withTimeout(searchPexels(query, usedIds), 8000, null),
+      withTimeout(searchPixabay(query, usedIds), 8000, null),
+    ]);
+    const clip = pexels || pixabay;
     if (clip) {
       usedIds.add(clip.externalId!);
       return { ...clip, localPath: undefined };
@@ -155,7 +160,7 @@ async function findOneClip(keyword: string, usedIds: Set<string>): Promise<Clip 
   return null;
 }
 
-// ── Public: find multiple clips for a section (20s hard cap) ─────────────────
+// ── Public: find multiple clips for a section (30s hard cap) ─────────────────
 export async function findMultipleFootage(
   section: ScriptSection,
   count: number,
@@ -163,48 +168,53 @@ export async function findMultipleFootage(
   usedIds: Set<string>
 ): Promise<Clip[]> {
   const searchPromise = async (): Promise<Clip[]> => {
-    const results: Clip[] = [];
-
     const keywords =
       section.visual_keywords.length > 0
         ? section.visual_keywords
         : deriveKeywordsFromNarration(section.narration);
 
-    for (const kw of keywords) {
-      if (results.length >= count) break;
-      const clip = await findOneClip(kw, usedIds);
-      if (clip) results.push(clip);
-    }
+    // Search all keywords in parallel instead of sequentially
+    const clipResults = await Promise.all(
+      keywords.slice(0, count).map((kw) => findOneClip(kw, usedIds))
+    );
+    const results = clipResults.filter((c): c is Clip => c !== null);
 
-    const fallbacks = [
-      "cinematic documentary footage",
-      "dramatic background footage",
-      "nature cinematic aerial",
-      "urban cityscape motion",
-      "close-up detail cinematic",
-    ];
-
-    for (const q of fallbacks) {
-      if (results.length >= count) break;
-      const clip = await withTimeout(
-        searchPexels(q, usedIds).then((c) => c || searchPixabay(q, usedIds)),
-        5000
+    // If we still need more, try fallbacks in parallel
+    if (results.length < count) {
+      const fallbacks = [
+        "cinematic documentary footage",
+        "dramatic background footage",
+        "nature cinematic aerial",
+        "urban cityscape motion",
+        "close-up detail cinematic",
+      ];
+      const needed = count - results.length;
+      const fallbackResults = await Promise.all(
+        fallbacks.slice(0, needed + 2).map((q) =>
+          withTimeout(
+            searchPexels(q, usedIds).then((c) => c || searchPixabay(q, usedIds)),
+            8000,
+            null
+          )
+        )
       );
-      if (clip) {
-        usedIds.add(clip.externalId!);
-        results.push({ ...clip, localPath: undefined });
+      for (const clip of fallbackResults) {
+        if (clip && results.length < count) {
+          usedIds.add(clip.externalId!);
+          results.push({ ...clip, localPath: undefined });
+        }
       }
     }
 
     return results;
   };
 
-  // Hard 20s cap per section — return whatever was found, never block pipeline
+  // Hard 30s cap — return whatever was found, never block pipeline
   const hardTimeout = new Promise<Clip[]>((resolve) =>
     setTimeout(() => {
-      console.warn(`Section ${section.id} footage search timed out after 20s`);
+      console.warn(`Section ${section.id} footage search timed out after 30s`);
       resolve([]);
-    }, 20_000)
+    }, 30_000)
   );
 
   return Promise.race([searchPromise(), hardTimeout]);
@@ -218,7 +228,7 @@ function deriveKeywordsFromNarration(narration: string): string[] {
   return phrases.slice(0, 3).map((p) => p.trim());
 }
 
-// ── Downloader (20s timeout — reduced from 60s to prevent pipeline stalls) ────
+// ── Downloader (60s timeout) ──────────────────────────────────────────────────
 export async function downloadClip(
   clip: Clip,
   videoId: string,
@@ -231,7 +241,7 @@ export async function downloadClip(
   if (!clip.videoUrl || !clip.videoUrl.startsWith("http")) return localPath;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
+  const timer = setTimeout(() => controller.abort(), 60_000);
 
   try {
     const res = await fetch(clip.videoUrl, { signal: controller.signal });
