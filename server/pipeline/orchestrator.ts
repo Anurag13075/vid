@@ -211,7 +211,7 @@ async function runPipeline(videoId: string) {
       });
     }
     // footagePathsPerSection: up to 3 diverse clips per section for 3-4s cuts
-    const footagePathsPerSection: (string[] | null)[] = [];
+
 
     for (let i = 0; i < script.sections.length; i++) {
       const section = script.sections[i];
