@@ -9,3 +9,5 @@ cmds = [
 
 [phases.build]
 cmds = ["pnpm run build"]
+
+[providers]
