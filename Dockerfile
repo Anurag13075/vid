@@ -11,16 +11,15 @@ RUN apt-get update && apt-get install -y \
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install edge-tts
 ENV PATH="/opt/venv/bin:$PATH"
 
-RUN npm install -g pnpm tsx
+RUN npm install -g tsx
 
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-
-RUN pnpm install --frozen-lockfile
+COPY package.json ./
+RUN npm install
 
 COPY . .
-RUN pnpm run build
+RUN npm run build
 
 EXPOSE 5000
 
