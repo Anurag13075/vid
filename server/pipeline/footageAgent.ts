@@ -218,7 +218,7 @@ function deriveKeywordsFromNarration(narration: string): string[] {
   return phrases.slice(0, 3).map((p) => p.trim());
 }
 
-// ── Downloader (60s timeout) ──────────────────────────────────────────────────
+// ── Downloader (20s timeout — reduced from 60s to prevent pipeline stalls) ────
 export async function downloadClip(
   clip: Clip,
   videoId: string,
@@ -231,7 +231,7 @@ export async function downloadClip(
   if (!clip.videoUrl || !clip.videoUrl.startsWith("http")) return localPath;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000);
+  const timer = setTimeout(() => controller.abort(), 20_000);
 
   try {
     const res = await fetch(clip.videoUrl, { signal: controller.signal });
