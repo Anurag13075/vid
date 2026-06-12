@@ -54,6 +54,10 @@ async function buildCut(
   outPath: string,
   overlayFilters: string[]
 ): Promise<void> {
+  // Clamp startSec to clip duration to avoid seeking past end
+  const clipDuration = await ffprobe(clipPath);
+  const safeStart = Math.min(startSec, Math.max(0, clipDuration - cutDuration - 0.5));
+
   const filters: string[] = [
     "scale=1280:720:force_original_aspect_ratio=decrease",
     "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
@@ -64,7 +68,7 @@ async function buildCut(
   ];
 
   await ffmpeg([
-    "-ss", String(startSec),
+    "-ss", String(safeStart),
     "-stream_loop", "-1",
     "-i", clipPath,
     "-vf", filters.join(","),
@@ -74,7 +78,6 @@ async function buildCut(
     "-an", "-y", outPath,
   ]);
 }
-
 // Process one script section into a multi-cut video that matches audio duration
 async function processSectionClips(
   footagePaths: string[],
