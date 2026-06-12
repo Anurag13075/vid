@@ -119,27 +119,97 @@ async function runPipeline(videoId: string) {
     // ── Phase 3: Footage search ─────────────────────────────────────────
     // FIX: create a per-job usedIds tracker instead of calling resetUsedClips()
     // (module-level state leaked across concurrent jobs in the old design)
+    // ── Phase 3: Footage search ─────────────────────────────────────────
     const usedIds = createClipTracker();
 
+    // Pre-initialize: graphic/empty sections are skipped immediately
     const clips: Clip[] = script.sections.map((s) => ({
       id: s.id,
-      keyword: s.visual_keywords.join(" · ") || "cinematic background",
+      keyword: s.visual_keywords[0] || "cinematic background", // first keyword only
       thumbUrl: "",
       videoUrl: "",
       source: "pexels" as const,
       externalId: "",
       duration: 10,
-      status: "pending" as const,
+      status: (s.section_type === "graphic" || !s.narration.trim())
+        ? "skipped" as const
+        : "pending" as const,
     }));
 
     await emit(videoId, {
       stage: "footage" as Stage,
       progress: 50,
-      message: "Searching Pexels & Pixabay for matching footage...",
+      message: "Searching for matching footage...",
       script,
       clips,
     });
 
+    // Pre-initialize results array
+    const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
+
+    // Process in parallel batches of 4 to avoid sequential stalling
+    const BATCH_SIZE = 4;
+
+    for (let batchStart = 0; batchStart < script.sections.length; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, script.sections.length);
+      const batchIndices = Array.from(
+        { length: batchEnd - batchStart },
+        (_, k) => batchStart + k
+      );
+
+      await Promise.all(
+        batchIndices.map(async (i) => {
+          const section = script.sections[i];
+
+          // Skip graphic sections and sections with no audio
+          if (section.section_type === "graphic" || !section.narration.trim() || !audioPaths[i]) {
+            footagePathsPerSection[i] = null;
+            // status already "skipped" from initialization
+            return;
+          }
+
+          clips[i] = { ...clips[i], status: "downloading" };
+
+          try {
+            const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
+
+            if (foundClips.length > 0) {
+              const downloadedPaths = await Promise.all(
+                foundClips.map((clip, ci) =>
+                  downloadClip(clip, videoId, `${section.id}_${ci}`)
+                )
+              );
+              clips[i] = {
+                ...foundClips[0],
+                localPath: downloadedPaths[0],
+                status: "ready",
+              };
+              footagePathsPerSection[i] = downloadedPaths;
+            } else {
+              clips[i] = { ...clips[i], status: "failed" };
+              footagePathsPerSection[i] = null;
+            }
+          } catch (err) {
+            console.error(`Footage failed for section ${section.id}:`, err);
+            clips[i] = { ...clips[i], status: "failed" };
+            footagePathsPerSection[i] = null;
+          }
+        })
+      );
+
+      // Emit progress after each batch completes
+      const readyCount = clips.filter((c) => c.status === "ready").length;
+      const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
+      const pct = 50 + Math.round((batchEnd / script.sections.length) * 18);
+
+      await emit(videoId, {
+        stage: "footage" as Stage,
+        progress: pct,
+        message: `${readyCount}/${totalSearchable} clips ready`,
+        script,
+        clips: [...clips],
+      });
+    }
     // footagePathsPerSection: up to 3 diverse clips per section for 3-4s cuts
     const footagePathsPerSection: (string[] | null)[] = [];
 
@@ -148,10 +218,10 @@ async function runPipeline(videoId: string) {
       const pct = 50 + Math.round((i / script.sections.length) * 18);
 
       // Skip sections with no audio (graphic transition sections)
-      if (!audioPaths[i]) {
-        footagePathsPerSection.push(null);
-        continue;
-      }
+      if (!audioPaths[i] || section.section_type === "graphic") {
+  footagePathsPerSection.push(null);
+  continue;
+}
 
       clips[i] = { ...clips[i], status: "downloading" };
       await emit(videoId, {

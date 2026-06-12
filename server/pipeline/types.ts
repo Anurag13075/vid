@@ -32,14 +32,13 @@ export interface Clip {
   id: number;
   keyword: string;
   thumbUrl: string;
-  videoUrl: string;
-  source: "pexels" | "pixabay" | "local";
-  externalId: string;
-  duration: number;
+  videoUrl?: string;
+  source?: "pexels" | "pixabay";
+  externalId?: string;
+  duration?: number;
   localPath?: string;
-  status: "pending" | "downloading" | "ready" | "failed";
+  status: "pending" | "downloading" | "ready" | "failed" | "skipped";
 }
-
 export interface RenderStep {
   label: string;
   done: boolean;
