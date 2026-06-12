@@ -3,7 +3,7 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover } from "./voiceover.js";
-import { findMultipleFootage, downloadClip, resetUsedClips } from "./footageAgent.js";
+import { findMultipleFootage, downloadClip, createClipTracker } from "./footageAgent.js";
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
 
@@ -80,7 +80,6 @@ async function runPipeline(videoId: string) {
     });
 
     // ── Phase 2: Voiceover ──────────────────────────────────────────────
-    const narrationSections = script.sections.filter((s) => s.section_type !== "graphic");
     await emit(videoId, {
       stage: "voiceover" as Stage,
       progress: 32,
@@ -118,7 +117,10 @@ async function runPipeline(videoId: string) {
     }
 
     // ── Phase 3: Footage search ─────────────────────────────────────────
-    resetUsedClips();
+    // FIX: create a per-job usedIds tracker instead of calling resetUsedClips()
+    // (module-level state leaked across concurrent jobs in the old design)
+    const usedIds = createClipTracker();
+
     const clips: Clip[] = script.sections.map((s) => ({
       id: s.id,
       keyword: s.visual_keywords.join(" · ") || "cinematic background",
@@ -161,8 +163,8 @@ async function runPipeline(videoId: string) {
       });
 
       try {
-        // Get up to 3 diverse clips — one per visual keyword
-        const foundClips = await findMultipleFootage(section, 3, videoId);
+        // FIX: pass usedIds so each section gets unique clips within this job
+        const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
 
         if (foundClips.length > 0) {
           // Download all clips in parallel for speed
