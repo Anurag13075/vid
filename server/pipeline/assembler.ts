@@ -1,7 +1,7 @@
-import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import type { ScriptSection, RenderStep } from "./types.js";
+import { ffmpeg, ffprobe } from "./ffmpeg.js";
 
 type ProgressFn = (step: number, total: number, label: string) => void;
 
@@ -19,35 +19,6 @@ function escapeText(s: string): string {
     .replace(/,/g, "\\,")
     .replace(/%/g, "")
     .slice(0, 52);
-}
-
-// ─── FFmpeg / FFprobe wrappers ───────────────────────────────────────────────
-function ffmpeg(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`FFmpeg error (${code}): ${stderr.slice(-1000)}`));
-    });
-    proc.on("error", (e) => reject(new Error(`FFmpeg not found: ${e.message}`)));
-  });
-}
-
-async function ffprobe(filePath: string): Promise<number> {
-  return new Promise((resolve) => {
-    const proc = spawn("ffprobe", [
-      "-v", "error",
-      "-show_entries", "format=duration",
-      "-of", "default=noprint_wrappers=1:nokey=1",
-      filePath,
-    ]);
-    let out = "";
-    proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    proc.on("close", () => resolve(parseFloat(out.trim()) || 5));
-    proc.on("error", () => resolve(5));
-  });
 }
 
 // ─── Build a single cut from a footage clip ──────────────────────────────────
