@@ -1,5 +1,2 @@
-providers = ["node"]
-
 [phases.setup]
 nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg", "python311", "python311Packages.pip"]
-...
