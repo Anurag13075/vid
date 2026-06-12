@@ -1,6 +1,6 @@
 [build]
-builder = "nixpacks"
-nixConfigPath = "nixpacks.toml"
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "tsx server/prod.ts"
