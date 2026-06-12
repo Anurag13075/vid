@@ -6,3 +6,6 @@ cmds = [
   "pip install edge-tts --break-system-packages",
   "pnpm i --frozen-lockfile"
 ]
+
+[phases.build]
+cmds = ["pnpm run build"]
