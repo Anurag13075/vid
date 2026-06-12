@@ -3,9 +3,11 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover } from "./voiceover.js";
+import { createClipTracker,    findMultipleFootage  ,downloadClip} from "./footageAgent.js";
 
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
+
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./queue.js";

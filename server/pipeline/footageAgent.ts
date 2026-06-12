@@ -3,6 +3,10 @@ import path from "path";
 import type { ScriptSection, RenderStep } from "./types.js";
 import { ffmpeg, ffprobe } from "./ffmpeg.js";
 
+export function createClipTracker(): Set<string> {
+  return new Set<string>();
+}
+
 type ProgressFn = (step: number, total: number, label: string) => void;
 
 const CUT_SECS = 3.5; // seconds per visual cut
@@ -378,7 +382,7 @@ export async function assemble(
   // ── Step 3: Concat section videos ────────────────────────────────────────
   onProgress(2, total, RENDER_STEPS[2].label);
   const concatVideo = path.join(tmpDir, "concat.mp4");
-  await concatSectionsWithTransitions(sectionVideos, sectionDurations, concatVideo);
+  await concatSectionsWithTransitions(sectionVideos, sectionDurations, concatVideo);  
 
   // ── Step 4: Mix audio ─────────────────────────────────────────────────────
   onProgress(3, total, RENDER_STEPS[3].label);
@@ -393,4 +397,65 @@ export async function assemble(
   onProgress(5, total, RENDER_STEPS[5].label);
 
   return { videoPath: finalMp4, thumbPath };
+}
+
+export async function findMultipleFootage(
+  section: ScriptSection,
+  limit: number,
+  videoId: string,
+  usedIds: Set<string>
+): Promise<Clip[]> {
+  // Search Pexels/Pixabay for clips matching section.visual_keywords
+  // Return up to `limit` clips, avoiding duplicates tracked in usedIds
+  const keyword = section.visual_keywords[0] || "cinematic background";
+  const clips: Clip[] = [];
+  
+  try {
+    // Example: search Pexels API
+    const response = await fetch(
+      `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=${limit}`,
+      { headers: { Authorization: Bun.env.PEXELS_API_KEY! } }
+    );
+    const data = await response.json() as any;
+    
+    for (const video of data.videos || []) {
+      if (usedIds.has(video.id)) continue;
+      if (clips.length >= limit) break;
+      
+      usedIds.add(video.id);
+      clips.push({
+        id: video.id,
+        keyword,
+        thumbUrl: video.image,
+        videoUrl: video.video_files[0]?.link || "",
+        source: "pexels",
+        externalId: String(video.id),
+        duration: video.duration,
+        status: "pending",
+      });
+    }
+  } catch (err) {
+    console.error(`Footage search failed for "${keyword}":`, err);
+  }
+  
+  return clips;
+}
+
+export async function downloadClip(
+  clip: Clip,
+  videoId: string,
+  suffix: string
+): Promise<string> {
+  // Download clip.videoUrl to /tmp/vidrush/{videoId}/{suffix}.mp4
+  // Return local path
+  const tmpDir = `/tmp/vidrush/${videoId}`;
+  await Bun.file(tmpDir).mkdir({ recursive: true });
+  
+  const outPath = `${tmpDir}/${suffix}.mp4`;
+  const response = await fetch(clip.videoUrl);
+  
+  if (!response.ok) throw new Error(`Download failed: ${response.statusText}`);
+  
+  await Bun.write(outPath, response);
+  return outPath;
 }
