@@ -1,8 +1,11 @@
 [phases.setup]
-nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg"]
+nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg", "python311", "python311Packages.pip"]
 
 [phases.build]
-cmds = ["pnpm install --frozen-lockfile && pnpm run build"]
+cmds = [
+  "pip install edge-tts",
+  "pnpm install --frozen-lockfile && pnpm run build"
+]
 
 [start]
 cmd = "node .output/server/index.mjs"
