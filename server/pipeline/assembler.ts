@@ -77,14 +77,15 @@ async function buildCut(
   ];
 
   await ffmpeg([
-    "-ss", String(safeStart),           // ← BEFORE -i: fast seek
-    "-i", clipPath,                     // ← no stream_loop (was causing null exit)
-    "-vf", filters.join(","),
-    "-t", String(Math.max(cutDuration, 0.5)),
-    "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
-    "-an", "-y", outPath,
-  ]);
-}
+  "-ss", String(safeStart),
+  "-i", clipPath,
+  "-vf", filters.join(","),
+  "-t", String(Math.max(cutDuration, 0.5)),
+  "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+  "-an",
+  "-map_metadata", "-1",   // ← ADD THIS: strips drop-frame timecode
+  "-y", outPath,
+]);
 
 // ─── Process one script section into a multi-cut video ──────────────────────
 async function processSectionClips(
