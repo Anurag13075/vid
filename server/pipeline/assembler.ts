@@ -76,16 +76,20 @@ async function buildCut(
     ...overlayFilters,
   ];
 
-  await ffmpeg([
-  "-ss", String(safeStart),
-  "-i", clipPath,
-  "-vf", filters.join(","),
-  "-t", String(Math.max(cutDuration, 0.5)),
-  "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
-  "-an",
-  "-map_metadata", "-1",   // ← ADD THIS: strips drop-frame timecode
-  "-y", outPath,
-]);
+ await ffmpeg([
+    "-ss", String(safeStart),
+    "-i", clipPath,
+    "-vf", filters.join(","),
+    "-t", String(Math.max(cutDuration, 0.5)),
+    "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+    "-an",
+    "-map_metadata", "-1",
+    "-y", outPath,
+  ]);
+}  // ← this closing brace was missing
+
+// ─── Process one script section into a multi-cut video ──────────────────────
+async function processSectionClips(
 
 // ─── Process one script section into a multi-cut video ──────────────────────
 async function processSectionClips(
