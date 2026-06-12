@@ -10,4 +10,5 @@ cmds = [
 [phases.build]
 cmds = ["pnpm run build"]
 
-[providers]
+[start]
+cmd = "tsx server/prod.ts"
