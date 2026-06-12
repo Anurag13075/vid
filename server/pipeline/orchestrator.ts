@@ -146,8 +146,11 @@ async function runPipeline(videoId: string) {
     // Pre-initialize results array
     const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
 
-    // Process in parallel batches of 4 to avoid sequential stalling
-    const BATCH_SIZE = 4;
+    // Hard cap per section: search (20s) + download 3 clips (20s each) = 45s max
+    const SECTION_HARD_CAP_MS = 45_000;
+
+    // Process in parallel batches of 3 to limit concurrent network pressure
+    const BATCH_SIZE = 3;
 
     for (let batchStart = 0; batchStart < script.sections.length; batchStart += BATCH_SIZE) {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, script.sections.length);
@@ -169,30 +172,67 @@ async function runPipeline(videoId: string) {
 
           clips[i] = { ...clips[i], status: "downloading" };
 
-          try {
-            const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
+          // Emit per-section start so UI reflects current activity immediately
+          const readyCountPre = clips.filter((c) => c.status === "ready").length;
+          const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
+          const pctPre = 50 + Math.round((i / script.sections.length) * 18);
+          await emit(videoId, {
+            stage: "footage" as Stage,
+            progress: pctPre,
+            message: `Finding clips for section ${i + 1}/${script.sections.length} (${readyCountPre}/${totalSearchable} ready)`,
+            script,
+            clips: [...clips],
+          });
 
-            if (foundClips.length > 0) {
-              const downloadedPaths = await Promise.all(
-                foundClips.map((clip, ci) =>
-                  downloadClip(clip, videoId, `${section.id}_${ci}`)
-                )
-              );
-              clips[i] = {
-                ...foundClips[0],
-                localPath: downloadedPaths[0],
-                status: "ready",
-              };
-              footagePathsPerSection[i] = downloadedPaths;
-            } else {
+          // Wrap entire search+download in a hard cap to prevent any single
+          // slow/hanging section from stalling the whole pipeline
+          const sectionWork = async () => {
+            try {
+              const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
+
+              if (foundClips.length > 0) {
+                // Download clips with individual timeouts (20s each in footageAgent)
+                const downloadResults = await Promise.allSettled(
+                  foundClips.map((clip, ci) =>
+                    downloadClip(clip, videoId, `${section.id}_${ci}`)
+                  )
+                );
+                const downloadedPaths = downloadResults
+                  .filter((r): r is PromiseFulfilledResult<string> => r.status === "fulfilled")
+                  .map((r) => r.value);
+
+                if (downloadedPaths.length > 0) {
+                  clips[i] = {
+                    ...foundClips[0],
+                    localPath: downloadedPaths[0],
+                    status: "ready",
+                  };
+                  footagePathsPerSection[i] = downloadedPaths;
+                } else {
+                  clips[i] = { ...clips[i], status: "failed" };
+                  footagePathsPerSection[i] = null;
+                }
+              } else {
+                clips[i] = { ...clips[i], status: "failed" };
+                footagePathsPerSection[i] = null;
+              }
+            } catch (err) {
+              console.error(`Footage failed for section ${section.id}:`, err);
               clips[i] = { ...clips[i], status: "failed" };
               footagePathsPerSection[i] = null;
             }
-          } catch (err) {
-            console.error(`Footage failed for section ${section.id}:`, err);
-            clips[i] = { ...clips[i], status: "failed" };
-            footagePathsPerSection[i] = null;
-          }
+          };
+
+          const hardTimeout = new Promise<void>((resolve) =>
+            setTimeout(() => {
+              console.warn(`Section ${section.id} timed out after ${SECTION_HARD_CAP_MS}ms — skipping`);
+              clips[i] = { ...clips[i], status: "failed" };
+              footagePathsPerSection[i] = null;
+              resolve();
+            }, SECTION_HARD_CAP_MS)
+          );
+
+          await Promise.race([sectionWork(), hardTimeout]);
         })
       );
 
