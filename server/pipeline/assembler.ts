@@ -51,7 +51,8 @@ async function ffprobe(filePath: string): Promise<number> {
 }
 
 // ─── Build a single cut from a footage clip ──────────────────────────────────
-// FIX: -ss BEFORE -i (fast input seek). stream_loop removed (caused null exit).
+// -ss BEFORE -i (fast input seek). stream_loop removed (caused null exit).
+// -map_metadata -1 strips drop-frame timecode from NTSC source clips.
 async function buildCut(
   clipPath: string,
   startSec: number,
@@ -67,7 +68,7 @@ async function buildCut(
   );
 
   const filters: string[] = [
-    "fps=25",  
+    "fps=25",
     "scale=1280:720:force_original_aspect_ratio=decrease",
     "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
     "format=yuv420p",
@@ -76,7 +77,7 @@ async function buildCut(
     ...overlayFilters,
   ];
 
- await ffmpeg([
+  await ffmpeg([
     "-ss", String(safeStart),
     "-i", clipPath,
     "-vf", filters.join(","),
@@ -86,10 +87,7 @@ async function buildCut(
     "-map_metadata", "-1",
     "-y", outPath,
   ]);
-}  // ← this closing brace was missing
-
-// ─── Process one script section into a multi-cut video ──────────────────────
-async function processSectionClips(
+}
 
 // ─── Process one script section into a multi-cut video ──────────────────────
 async function processSectionClips(
@@ -174,8 +172,8 @@ async function processSectionClips(
   }
 
   // Concat sub-cuts with dissolve transitions.
-  // FIX: accumulate offset from actual cut durations, not a fixed CUT_SECS.
-  const TRANS = 0.2; // slightly shorter for snappier feel
+  // Accumulate offset from actual cut durations, not a fixed CUT_SECS.
+  const TRANS = 0.2;
   const inputs = subClipPaths.flatMap((p) => ["-i", p]);
   let filterGraph = "";
   let prevLabel = "[0:v]";
@@ -183,7 +181,6 @@ async function processSectionClips(
 
   for (let i = 1; i < subClipPaths.length; i++) {
     const outLabel = i === subClipPaths.length - 1 ? "[vout]" : `[v${i}]`;
-    // Offset = sum of preceding durations minus transition overlap
     offset += subClipDurations[i - 1] - TRANS;
     filterGraph += `${prevLabel}[${i}:v]xfade=transition=dissolve:duration=${TRANS}:offset=${offset.toFixed(3)}${outLabel};`;
     prevLabel = outLabel;
@@ -257,7 +254,7 @@ async function concatSectionsWithTransitions(
   const TRANS_DUR = 0.4;
   let filterGraph = "";
   let prevLabel = "[0:v]";
-  // FIX: accumulate offset from actual durations, not assuming they're equal
+  // Accumulate offset from actual durations, not assuming they're equal
   let timeOffset = 0;
 
   for (let i = 1; i < clipPaths.length; i++) {
@@ -278,8 +275,8 @@ async function concatSectionsWithTransitions(
 }
 
 // ─── Final audio/video mix ───────────────────────────────────────────────────
-// FIX: removed -shortest on the mux pass; instead pad audio to video length
-// to prevent audio cutting out early when video is fractionally longer.
+// Pad audio to video length to prevent audio cutting out early when video
+// is fractionally longer than the voiceover.
 async function finalMix(
   videoPath: string,
   voiceoverPath: string,
@@ -294,7 +291,6 @@ async function finalMix(
     await ffmpeg([
       ...inputs,
       "-filter_complex",
-      // Pad voiceover to video length, then mix with BGM at 7% volume
       "[1:a]apad[vo];[2:a]volume=0.07[bgm];[vo][bgm]amix=inputs=2:duration=first[a]",
       "-map", "0:v",
       "-map", "[a]",
