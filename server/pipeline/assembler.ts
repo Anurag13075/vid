@@ -59,7 +59,7 @@ async function buildCut(
     "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
     "format=yuv420p",
     "eq=contrast=1.08:brightness=0.02:saturation=1.12",
-    "unsharp=3:3:0.5:0:0:0",
+    "unsharp=3:3:0.5:3:3:0.3",
     ...overlayFilters,
   ];
 
