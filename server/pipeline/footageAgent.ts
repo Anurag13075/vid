@@ -98,30 +98,44 @@ async function searchPixabay(query: string): Promise<Clip | null> {
   return null;
 }
 
+function simplifyQuery(keyword: string): string {
+  return keyword
+    .replace(/^motion graphic[:]\s*/i, "")
+    .replace(/^cgi recreation[:]\s*/i, "")
+    .replace(/^artistic rendering[:]\s*/i, "")
+    .replace(/^dramatic recreation[:]\s*/i, "")
+    .replace(/^animation[:]\s*/i, "")
+    .replace(/^infographic[:]\s*/i, "")
+    .replace(/^text ['"].*?['"]/i, "")
+    .replace(/^number \d+[\s\w]*/i, "")
+    .replace(/appearing with impact/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 50);
+}
+
 function buildSearchQueries(keyword: string): string[] {
-  const base = keyword.trim();
+  const simplified = simplifyQuery(keyword);
+  const base = simplified || "cinematic documentary";
   return [
     base,
     `${base} cinematic`,
     `${base} footage`,
-    `${base} close-up`,
-    `${base} slow motion`,
-    `${base} aerial`,
   ];
 }
 
-function deriveKeywordsFromNarration(narration: string): string[] {
-  const phrases = narration
-    .replace(/[\r\n]/g, " ")
-    .split(/\s*[,\.\-–:]\s*/)
-    .filter((p) => p.length >= 15 && p.length <= 60);
-  return phrases.slice(0, 3).map((p) => p.trim());
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), ms));
+  return Promise.race([promise, timeout]);
 }
 
 async function findOneClip(keyword: string): Promise<Clip | null> {
   const queries = buildSearchQueries(keyword);
   for (const query of queries) {
-    const clip = await searchPexels(query) || await searchPixabay(query);
+    const clip = await withTimeout(
+      searchPexels(query).then((c) => c || searchPixabay(query)),
+      8000
+    );
     if (clip) {
       usedClipIds.add(clip.externalId);
       return { ...clip, localPath: undefined };
@@ -130,7 +144,6 @@ async function findOneClip(keyword: string): Promise<Clip | null> {
   return null;
 }
 
-// Find a single clip (kept for backward compat)
 export async function findFootage(section: ScriptSection, _videoId: string): Promise<Clip | null> {
   const keywords = section.visual_keywords.length > 0
     ? section.visual_keywords
@@ -143,7 +156,10 @@ export async function findFootage(section: ScriptSection, _videoId: string): Pro
 
   const fallbacks = ["cinematic documentary background", "dramatic cinematic footage", "dynamic motion background"];
   for (const q of fallbacks) {
-    const clip = await searchPexels(q) || await searchPixabay(q);
+    const clip = await withTimeout(
+      searchPexels(q).then((c) => c || searchPixabay(q)),
+      8000
+    );
     if (clip) {
       usedClipIds.add(clip.externalId);
       return clip;
@@ -153,7 +169,6 @@ export async function findFootage(section: ScriptSection, _videoId: string): Pro
   return null;
 }
 
-// Find MULTIPLE diverse clips for a section (one per keyword = diverse shots)
 export async function findMultipleFootage(
   section: ScriptSection,
   count: number,
@@ -165,14 +180,12 @@ export async function findMultipleFootage(
     ? section.visual_keywords
     : deriveKeywordsFromNarration(section.narration);
 
-  // One clip per keyword — ensures visual diversity per section
   for (const kw of keywords) {
     if (results.length >= count) break;
     const clip = await findOneClip(kw);
     if (clip) results.push(clip);
   }
 
-  // Fill remaining slots with fallback queries
   const fallbacks = [
     "cinematic documentary footage",
     "dramatic background footage",
@@ -183,7 +196,10 @@ export async function findMultipleFootage(
 
   for (const q of fallbacks) {
     if (results.length >= count) break;
-    const clip = await searchPexels(q) || await searchPixabay(q);
+    const clip = await withTimeout(
+      searchPexels(q).then((c) => c || searchPixabay(q)),
+      8000
+    );
     if (clip) {
       usedClipIds.add(clip.externalId);
       results.push({ ...clip, localPath: undefined });
@@ -191,6 +207,14 @@ export async function findMultipleFootage(
   }
 
   return results;
+}
+
+function deriveKeywordsFromNarration(narration: string): string[] {
+  const phrases = narration
+    .replace(/[\r\n]/g, " ")
+    .split(/\s*[,\.\-–:]\s*/)
+    .filter((p) => p.length >= 15 && p.length <= 60);
+  return phrases.slice(0, 3).map((p) => p.trim());
 }
 
 export async function downloadClip(
