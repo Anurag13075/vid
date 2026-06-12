@@ -112,7 +112,7 @@ export function TopicInput({ onSubmit }: TopicInputProps) {
             placeholder={mode === "manual" ? "Describe your video in detail — style, tone, structure..." : "Produce a long-form video about..."}
             rows={mode === "manual" ? 4 : 2}
             className="flex-1 bg-transparent border-0 outline-none text-[17px] text-white placeholder:text-[#6a6a78] py-2 resize-none leading-snug"
-            autoFocus
+            
             disabled={submitting}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
