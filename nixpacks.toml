@@ -1,14 +1,2 @@
 [phases.setup]
-nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg", "python311", "python311Packages.pip"]
-
-[phases.install]
-cmds = [
-  "pip install edge-tts --break-system-packages",
-  "pnpm i --frozen-lockfile"
-]
-
-[phases.build]
-cmds = ["pnpm run build"]
-
-[start]
-cmd = "tsx server/prod.ts"
+nixpkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg", "python311", "python311Packages.pip", "bun"]
