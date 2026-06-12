@@ -1,7 +1,8 @@
 import { spawn } from "child_process";
-import { promises as fs, existsSync } from "fs";
+import { promises as fs } from "fs";
 import path from "path";
 import type { ScriptSection } from "./types.js";
+import { ffmpeg, ffprobe } from "./ffmpeg.js";
 
 // ─── Voice catalogue ────────────────────────────────────────────────────────
 // NOTE: Labels / IDs are kept identical to the original MiniMax list so that
@@ -50,27 +51,6 @@ function resolveEdgeVoice(voiceId: string): string {
 // edge-tts is installed as a Python CLI on Railway (pip install edge-tts).
 // We call it as a child process so we stay in pure Node/TS with no Python SDK.
 
-// Resolve the edge-tts binary path: check .pythonlibs/bin first (Replit),
-// then fall back to whatever is on PATH (Railway, local, etc.)
-function getEdgeTtsBin(): string {
-  const candidates = [
-    "/home/runner/workspace/.pythonlibs/bin/edge-tts",
-    "/home/runner/.pythonlibs/bin/edge-tts",
-    "edge-tts",
-  ];
-  for (const bin of candidates) {
-    try {
-      // If the path contains a slash it's absolute — trust it exists if /home/runner/workspace is present
-      if (!bin.includes("/")) return bin; // fall through to PATH lookup
-      if (!existsSync(bin)) throw new Error("not found");
-      return bin;
-    } catch {
-      // not found at this path, try next
-    }
-  }
-  return "edge-tts"; // last resort — rely on PATH
-}
-
 async function generateEdgeTTS(
   text: string,
   edgeVoice: string,
@@ -78,22 +58,14 @@ async function generateEdgeTTS(
 ): Promise<void> {
   // edge-tts writes MP3 directly; no intermediate conversion needed.
   return new Promise((resolve, reject) => {
-    // Timeout: 90s per section — generous enough for long narrations
-    const TIMEOUT_MS = 90_000;
+    // Timeout: 2 min — same as the old MiniMax timeout
+    const TIMEOUT_MS = 120_000;
 
-    const edgeBin = getEdgeTtsBin();
-
-    // Extend PATH so edge-tts can find its own Python deps
-    const env = {
-      ...process.env,
-      PATH: `/home/runner/workspace/.pythonlibs/bin:/home/runner/.pythonlibs/bin:${process.env.PATH ?? ""}`,
-    };
-
-    const proc = spawn(edgeBin, [
+    const proc = spawn("edge-tts", [
       "--voice", edgeVoice,
       "--text", text,
       "--write-media", outputPath,
-    ], { stdio: ["ignore", "ignore", "pipe"], env });
+    ], { stdio: ["ignore", "ignore", "pipe"] });
 
     let stderr = "";
     proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
@@ -198,42 +170,19 @@ function estimateDuration(text: string): number {
 
 async function generateSilence(outputPath: string, durationMs: number): Promise<void> {
   const sec = Math.max(durationMs / 1000, 0.5);
-  return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", [
-      "-f", "lavfi",
-      "-i", "anullsrc=r=44100:cl=stereo",
-      "-t", String(sec),
-      "-q:a", "9",
-      "-acodec", "libmp3lame",
-      "-y", outputPath,
-    ], { stdio: "ignore" });
-    proc.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`silence gen failed: ${code}`))
-    );
-    proc.on("error", reject);
-  });
+  await ffmpeg([
+    "-f", "lavfi",
+    "-i", "anullsrc=r=44100:cl=stereo",
+    "-t", String(sec),
+    "-q:a", "9",
+    "-acodec", "libmp3lame",
+    "-y", outputPath,
+  ]);
 }
 
 async function getAudioDurationMs(filePath: string): Promise<number> {
-  return new Promise((resolve) => {
-    const proc = spawn("ffprobe", [
-      "-v", "error",
-      "-show_entries", "format=duration",
-      "-of", "default=noprint_wrappers=1:nokey=1",
-      filePath,
-    ]);
-    let out = "";
-    proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    proc.on("close", (code) => {
-      if (code === 0) {
-        const sec = parseFloat(out.trim());
-        resolve(isNaN(sec) ? 5000 : Math.round(sec * 1000));
-      } else {
-        resolve(5000);
-      }
-    });
-    proc.on("error", () => resolve(5000));
-  });
+  const seconds = await ffprobe(filePath);
+  return Math.round(seconds * 1000) || 5000;
 }
 
 function sleep(ms: number): Promise<void> {
