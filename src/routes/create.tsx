@@ -136,6 +136,27 @@ const BACKGROUNDS: BackgroundOption[] = [
 
 // ─── Wizard Component ─────────────────────────────────────────────────────────
 
+async function createJob(params: {
+  topic: string;
+  voice: string;
+  length: string;
+  theme: string;
+  background: string;
+  mode: string;
+}): Promise<string> {
+  const res = await fetch('/api/videos', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Server error: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.videoId ?? data.id;
+}
+
 function CreateWizard() {
   const { topic, length, mode } = Route.useSearch();
   const navigate = useNavigate();
