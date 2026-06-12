@@ -34,7 +34,7 @@ export interface Clip {
   id: number;
   keyword: string;
   thumbUrl: string;
-  status: "pending" | "downloading" | "ready" | "failed";
+  status: "pending" | "downloading" | "ready" | "failed" | "skipped";
 }
 
 export interface RenderStep {
