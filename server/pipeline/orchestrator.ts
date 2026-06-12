@@ -119,7 +119,6 @@ async function runPipeline(videoId: string) {
     // ── Phase 3: Footage search ─────────────────────────────────────────
     // FIX: create a per-job usedIds tracker instead of calling resetUsedClips()
     // (module-level state leaked across concurrent jobs in the old design)
-    // ── Phase 3: Footage search ─────────────────────────────────────────
     const usedIds = createClipTracker();
 
     // Pre-initialize: graphic/empty sections are skipped immediately
@@ -211,59 +210,10 @@ async function runPipeline(videoId: string) {
       });
     }
     // footagePathsPerSection: up to 3 diverse clips per section for 3-4s cuts
-
-
-    for (let i = 0; i < script.sections.length; i++) {
-      const section = script.sections[i];
-      const pct = 50 + Math.round((i / script.sections.length) * 18);
-
-      // Skip sections with no audio (graphic transition sections)
-      if (!audioPaths[i] || section.section_type === "graphic") {
-  footagePathsPerSection.push(null);
-  continue;
-}
-
-      clips[i] = { ...clips[i], status: "downloading" };
-      await emit(videoId, {
-        stage: "footage" as Stage,
-        progress: pct,
-        message: `Finding clips for: "${section.visual_keywords[0]}"`,
-        script,
-        clips: [...clips],
-      });
-
-      try {
-        // FIX: pass usedIds so each section gets unique clips within this job
-        const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
-
-        if (foundClips.length > 0) {
-          // Download all clips in parallel for speed
-          const downloadedPaths = await Promise.all(
-            foundClips.map((clip, ci) =>
-              downloadClip(clip, videoId, `${section.id}_${ci}`)
-            )
-          );
-          // Use first clip for UI display
-          clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
-          footagePathsPerSection.push(downloadedPaths);
-        } else {
-          clips[i] = { ...clips[i], status: "failed" };
-          footagePathsPerSection.push(null);
-        }
-      } catch (err) {
-        console.error(`Footage failed for section ${section.id}:`, err);
-        clips[i] = { ...clips[i], status: "failed" };
-        footagePathsPerSection.push(null);
-      }
-
-      await emit(videoId, {
-        stage: "footage" as Stage,
-        progress: pct,
-        message: `${clips.filter((c) => c.status === "ready").length} sections ready`,
-        script,
-        clips: [...clips],
-      });
-    }
+    // (NOTE: removed the old duplicate sequential loop that re-searched/re-downloaded
+    // footage for every section a second time and pushed mismatched entries into
+    // footagePathsPerSection, doubling search time and misaligning the array passed
+    // to assemble())
 
     // ── Phase 4: Assembly ───────────────────────────────────────────────
     const renderSteps = RENDER_STEPS.map((s) => ({ ...s }));
