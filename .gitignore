@@ -36,8 +36,8 @@ server/data/
 *.mp4
 *.mp3
 *.wav
-*.jpg
-*.png
+!src/assets/*.jpg
+!src/assets/*.png
 server/.env
 .env
 *.env
