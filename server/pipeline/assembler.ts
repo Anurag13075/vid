@@ -68,16 +68,15 @@ async function buildCut(
   ];
 
   await ffmpeg([
-    "-ss", String(safeStart),
     "-stream_loop", "-1",
     "-i", clipPath,
+    "-ss", String(safeStart),  // after -i
     "-vf", filters.join(","),
     "-t", String(Math.max(cutDuration, 0.5)),
     "-r", "25",
     "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
     "-an", "-y", outPath,
-  ]);
-}
+]);}
 // Process one script section into a multi-cut video that matches audio duration
 async function processSectionClips(
   footagePaths: string[],
