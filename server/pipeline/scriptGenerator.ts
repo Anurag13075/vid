@@ -35,7 +35,7 @@ Return this exact JSON structure with no additional text:
   "sections": [
     {
       "id": 1,
-      "narration": "string (spoken narration — 5-9 sentences, 100-180 words. Write rich, detailed, storytelling prose. Immersive tone. Every sentence drives the story forward. No bullet points, no padding.)",
+      "narration": "string (spoken narration — 5-9 sentences, 100-180 words. Write rich, detailed, storytelling prose. For section_type graphic, use empty string \\"\\". No bullet points.)",
       "visual_keywords": ["specific visual 1", "specific visual 2", "specific visual 3"],
       "section_type": "intro | broll | stat | graphic | outro",
       "key_point": "string or null",
@@ -52,14 +52,15 @@ CRITICAL RULES:
 2. section_type = "stat" for ANY narration containing a specific number, percentage, dollar figure, date, or measurable claim
 3. section_type = "intro" ONLY for the opening hook (1st section) — make it gripping, start in the middle of the action
 4. section_type = "outro" ONLY for the final CTA (last section)
-5. section_type = "graphic" for 1-2 pure visual transition moments at major act breaks — narration is empty string "" for these
+5. section_type = "graphic" for 1-2 pure visual transition moments at major act breaks — narration MUST be empty string "" for these
 6. key_point: short lower-third callout text (max 8 words) only for truly striking facts or stats — otherwise null
 7. sfx: true only when a sound effect enhances the moment (stat reveal, dramatic twist)
 8. Write EXACTLY ${target} sections total — no more, no less
-9. narration MUST be 100-180 words. Count your words. Every section needs substantial, detailed prose.
-10. Use the audio narration to suggest a matching visual cut every 2-3 seconds and include at least one specific motion-graphic section for data or stats. `;
+9. narration MUST be 100-180 words for non-graphic sections. Count your words.
+10. Use the audio narration to suggest a matching visual cut every 2-3 seconds and include at least one specific motion-graphic section for data or stats.`;
 
   let lastError: Error | null = null;
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const message = await anthropic.messages.create({
@@ -69,24 +70,41 @@ CRITICAL RULES:
         messages: [{ role: "user", content: prompt }],
       });
 
-      const raw = message.content[0].type === "text" ? message.content[0].text : "{}";
+      const raw =
+        message.content[0].type === "text" ? message.content[0].text : "{}";
 
-      // Strip any markdown code fences if Claude added them
-      const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+      // Strip markdown fences if the model wrapped the JSON
+      const cleaned = raw
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+
       const parsed = JSON.parse(cleaned) as Script;
 
-      if (!parsed.sections || !Array.isArray(parsed.sections) || parsed.sections.length < 8) {
-        throw new Error(`Script has too few sections: ${parsed.sections?.length ?? 0}`);
+      if (!parsed.sections || !Array.isArray(parsed.sections)) {
+        throw new Error("Script missing sections array");
+      }
+      if (parsed.sections.length < 8) {
+        throw new Error(`Script has too few sections: ${parsed.sections.length}`);
       }
 
-      parsed.sections = parsed.sections.map((s, i) => ({
-        ...s,
-        id: i + 1,
-        visual_keywords: Array.isArray(s.visual_keywords) ? s.visual_keywords : [String(s.visual_keywords)],
-        key_point: s.key_point || null,
-        sfx: Boolean(s.sfx),
-        estimated_words: s.estimated_words || 120,
-      }));
+      // Normalise and guard each section
+      parsed.sections = parsed.sections.map((s, i) => {
+        const isGraphic = s.section_type === "graphic";
+        return {
+          ...s,
+          id: i + 1,
+          // Graphic sections must have empty narration so voiceover skips them
+          narration: isGraphic ? "" : (s.narration || ""),
+          visual_keywords: Array.isArray(s.visual_keywords)
+            ? s.visual_keywords
+            : [String(s.visual_keywords || "")],
+          key_point: s.key_point || null,
+          sfx: Boolean(s.sfx),
+          estimated_words: s.estimated_words || 120,
+        };
+      });
 
       return parsed;
     } catch (err) {
@@ -95,9 +113,10 @@ CRITICAL RULES:
       if (attempt < 3) await sleep(5000 * attempt);
     }
   }
+
   throw lastError || new Error("Script generation failed after 3 attempts");
 }
 
-function sleep(ms: number) {
+function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

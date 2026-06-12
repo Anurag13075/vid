@@ -1,10 +1,6 @@
-import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
-import { Logo } from "@/components/Logo";
-import { createJob } from "@/lib/pipeline";
 import {
   ChevronLeft, Play, Heart, Check, Search, Loader2,
-  Mic2, Palette, Image as ImageIcon, Clock,
+  Mic2, Palette, Image as ImageIcon, Clock, Square,
 } from "lucide-react";
 import { z } from "zod";
 
@@ -20,7 +16,7 @@ export const Route = createFileRoute("/create")({
   component: CreateWizard,
 });
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 interface VoiceOption {
   id: string;
@@ -47,6 +43,8 @@ interface BackgroundOption {
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
+// Provider label stays "MiniMax TTS" everywhere in the UI.
+// The actual synthesis is done by edge-tts on the server (voiceover.ts).
 const VOICES: VoiceOption[] = [
   { id: "presenter_female",   label: "Aria",        provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Warm"],         gender: "Female" },
   { id: "audiobook_female_1", label: "Ava",         provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Natural"],      gender: "Female" },
@@ -61,6 +59,25 @@ const VOICES: VoiceOption[] = [
   { id: "audiobook_male_2",   label: "Drake",       provider: "MiniMax TTS", tags: ["Male", "Mature", "American", "Documentary"],   gender: "Male" },
   { id: "newscast_female",    label: "Natalie",     provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Professional"], gender: "Female" },
 ];
+
+// Default voice: Magnus (deep_space_master) → en-US-ChristopherNeural on the server
+const DEFAULT_VOICE = "deep_space_master";
+
+// Preview sample text per voice gender — short enough to generate instantly
+const PREVIEW_TEXT: Record<string, string> = {
+  presenter_female:   "Welcome. I'm Aria, your warm and engaging narrator.",
+  audiobook_female_1: "Hello, I'm Ava. Let me tell your story naturally.",
+  presenter_male:     "Hey, I'm Brian. Deep, clear, and ready to narrate.",
+  audiobook_male_1:   "I'm Christopher. Authoritative narration, every time.",
+  newscast_male:      "This is Guy, bringing you neutral, professional delivery.",
+  casual_guy:         "What's up? I'm Andrew — conversational and easy to follow.",
+  wise_woman:         "I'm Eleanor. Every story deserves a wise, measured voice.",
+  deep_space_master:  "I am Magnus. The voice of epic, cinematic documentary.",
+  calm_woman:         "I'm Serenity. Calm, steady narration for any topic.",
+  audiobook_female_2: "Hi, I'm Grace. I bring stories to life with warmth.",
+  audiobook_male_2:   "Drake here. Documentary-grade narration, built for impact.",
+  newscast_female:    "I'm Natalie. Professional, polished, and precise.",
+};
 
 const THEMES: ThemeOption[] = [
   {
@@ -113,14 +130,15 @@ const BACKGROUNDS: BackgroundOption[] = [
   { id: "velvet_noir",      label: "Velvet Noir",      css: "linear-gradient(135deg, #120024 0%, #1e0038 50%, #0a0014 100%)", preview: "#120024" },
 ];
 
-// ─── Wizard Component ────────────────────────────────────────────────────────
+// ─── Wizard Component ─────────────────────────────────────────────────────────
 
 function CreateWizard() {
   const { topic, length, mode } = Route.useSearch();
   const navigate = useNavigate();
 
   const [step, setStep] = useState(1);
-  const [voice, setVoice] = useState("presenter_male");
+  // Default to Magnus (deep male) instead of Brian
+  const [voice, setVoice] = useState(DEFAULT_VOICE);
   const [theme, setTheme] = useState("modern");
   const [background, setBackground] = useState("gradient_dark");
   const [submitting, setSubmitting] = useState(false);
@@ -210,7 +228,7 @@ function CreateWizard() {
   );
 }
 
-// ─── Step 1: Voice Over Selection ────────────────────────────────────────────
+// ─── Step 1: Voice Over Selection ─────────────────────────────────────────────
 
 function VoiceStep({
   selected,
@@ -224,7 +242,13 @@ function VoiceStep({
   const [tab, setTab] = useState<"default" | "favourites">("default");
   const [search, setSearch] = useState("");
   const [favourites, setFavourites] = useState<Set<string>>(new Set());
+
+  // previewing: which voice id is currently playing
   const [previewing, setPreviewing] = useState<string | null>(null);
+  // previewLoading: which voice is fetching audio right now
+  const [previewLoading, setPreviewLoading] = useState<string | null>(null);
+  // keeps a ref to the current Audio instance so we can stop it
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   function toggleFav(id: string) {
     setFavourites((prev) => {
@@ -234,6 +258,66 @@ function VoiceStep({
       return next;
     });
   }
+
+  // ── Edge-TTS preview ───────────────────────────────────────────────────────
+  // Calls GET /api/voices/preview?voice=<id> which returns audio/mpeg.
+  // The server uses edge-tts under the hood; the frontend has no idea.
+  async function handlePreview(voiceId: string) {
+    // Stop any currently playing preview
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+
+    // Clicking the playing voice stops it
+    if (previewing === voiceId) {
+      setPreviewing(null);
+      return;
+    }
+
+    setPreviewLoading(voiceId);
+    setPreviewing(null);
+
+    try {
+      const text = encodeURIComponent(
+        PREVIEW_TEXT[voiceId] ?? "Hello, this is a voice preview."
+      );
+      const res = await fetch(`/api/voices/preview?voice=${voiceId}&text=${text}`);
+      if (!res.ok) throw new Error(`Preview failed: ${res.status}`);
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+
+      audio.onended = () => {
+        setPreviewing(null);
+        URL.revokeObjectURL(url);
+      };
+      audio.onerror = () => {
+        setPreviewing(null);
+        URL.revokeObjectURL(url);
+      };
+
+      await audio.play();
+      setPreviewing(voiceId);
+    } catch (err) {
+      console.error("Voice preview error:", err);
+      setPreviewing(null);
+    } finally {
+      setPreviewLoading(null);
+    }
+  }
+
+  // Clean up audio on unmount
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
 
   const filtered = VOICES.filter((v) => {
     if (tab === "favourites" && !favourites.has(v.id)) return false;
@@ -282,6 +366,7 @@ function VoiceStep({
         ))}
         <div className="flex-1" />
         <div className="pb-2 flex items-end">
+          {/* MiniMax TTS label preserved exactly */}
           <span className="text-[11px] text-[var(--text-muted)]">Powered by MiniMax TTS</span>
         </div>
       </div>
@@ -318,9 +403,10 @@ function VoiceStep({
               isSelected={selected === v.id}
               isFavourite={favourites.has(v.id)}
               isPreviewing={previewing === v.id}
+              isPreviewLoading={previewLoading === v.id}
               onSelect={() => onSelect(v.id)}
               onToggleFav={() => toggleFav(v.id)}
-              onPreview={() => setPreviewing(previewing === v.id ? null : v.id)}
+              onPreview={() => handlePreview(v.id)}
             />
           ))
         )}
@@ -340,11 +426,14 @@ function VoiceStep({
   );
 }
 
+// ─── Voice Card ───────────────────────────────────────────────────────────────
+
 function VoiceCard({
   voice,
   isSelected,
   isFavourite,
   isPreviewing,
+  isPreviewLoading,
   onSelect,
   onToggleFav,
   onPreview,
@@ -353,6 +442,7 @@ function VoiceCard({
   isSelected: boolean;
   isFavourite: boolean;
   isPreviewing: boolean;
+  isPreviewLoading: boolean;
   onSelect: () => void;
   onToggleFav: () => void;
   onPreview: () => void;
@@ -382,6 +472,7 @@ function VoiceCard({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <span className="font-semibold text-white text-[14px]">{voice.label}</span>
+          {/* Provider label: "MiniMax TTS" — never changes */}
           <span className="text-[11px] text-[var(--text-muted)]">— {voice.provider}</span>
         </div>
         <div className="flex flex-wrap gap-1">
@@ -396,16 +487,44 @@ function VoiceCard({
         </div>
       </div>
 
-      {/* Actions */}
+      {/* Actions — stop propagation so clicking buttons doesn't also select the voice */}
       <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+        {/* Favourite toggle */}
         <button
           onClick={onToggleFav}
           className={`h-8 w-8 rounded-lg flex items-center justify-center transition-colors ${
-            isFavourite ? "text-rose-400 bg-rose-500/10" : "text-[var(--text-muted)] hover:text-rose-400 hover:bg-rose-500/10"
+            isFavourite
+              ? "text-rose-400 bg-rose-500/10"
+              : "text-[var(--text-muted)] hover:text-rose-400 hover:bg-rose-500/10"
           }`}
+          title="Add to favourites"
         >
           <Heart className={`h-4 w-4 ${isFavourite ? "fill-current" : ""}`} />
         </button>
+
+        {/* Preview button — plays edge-tts audio, shows spinner while loading */}
+        <button
+          onClick={onPreview}
+          disabled={isPreviewLoading}
+          className={`h-8 w-8 rounded-lg flex items-center justify-center transition-colors ${
+            isPreviewing
+              ? "text-white bg-[var(--accent)]"
+              : isPreviewLoading
+              ? "text-[var(--text-muted)] bg-[var(--bg-hover)]"
+              : "text-[var(--text-muted)] hover:text-white hover:bg-[var(--accent)]/20"
+          }`}
+          title={isPreviewing ? "Stop preview" : "Preview voice"}
+        >
+          {isPreviewLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : isPreviewing ? (
+            <Square className="h-3.5 w-3.5 fill-current" />
+          ) : (
+            <Play className="h-4 w-4" />
+          )}
+        </button>
+
+        {/* Select button */}
         <button
           onClick={onSelect}
           className={`px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors ${
@@ -425,7 +544,7 @@ function VoiceCard({
   );
 }
 
-// ─── Step 2: Theme Selection ─────────────────────────────────────────────────
+// ─── Step 2: Theme Selection ──────────────────────────────────────────────────
 
 function ThemeStep({
   selected,
@@ -464,7 +583,6 @@ function ThemeStep({
                   : "border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--border-active)]"
               }`}
             >
-              {/* Theme mini preview */}
               <div
                 className="h-12 w-16 rounded-lg shrink-0 flex items-end p-1"
                 style={{ background: theme.preview.bg, border: `2px solid ${theme.preview.accent}30` }}
@@ -512,9 +630,9 @@ function ThemeStep({
 
 function ThemePreview({ theme }: { theme: ThemeOption }) {
   const sampleLines = [
-    { text: "This selection", highlight: "highlights specific text", rest: " within paragraphs. You can use it to draw attention to important phrases or concepts.", bold: false },
-    { text: "The selection moves ", highlight: "sequentially across", rest: " all paragraphs, highlighting each marked phrase. You can customize styling and effects via themes.", bold: true },
-    { text: "For best results, keep highlighted phrases relatively short and ensure they", highlight: " exactly match text", rest: " within the paragraphs.", bold: false },
+    { text: "This selection", highlight: "highlights specific text", rest: " within paragraphs. You can use it to draw attention to important phrases or concepts." },
+    { text: "The selection moves ", highlight: "sequentially across", rest: " all paragraphs, highlighting each marked phrase. You can customize styling and effects via themes." },
+    { text: "For best results, keep highlighted phrases relatively short and ensure they", highlight: " exactly match text", rest: " within the paragraphs." },
   ];
 
   return (
@@ -522,7 +640,6 @@ function ThemePreview({ theme }: { theme: ThemeOption }) {
       className="rounded-2xl overflow-hidden border border-white/10 h-full min-h-[400px] flex flex-col"
       style={{ background: theme.preview.bg }}
     >
-      {/* Video preview area */}
       <div className="flex-1 p-6 flex flex-col justify-between">
         <div className="space-y-4">
           {sampleLines.map((line, i) => (
@@ -530,10 +647,7 @@ function ThemePreview({ theme }: { theme: ThemeOption }) {
               {line.text}
               <span
                 className="font-semibold px-0.5 rounded"
-                style={{
-                  color: theme.accentColor,
-                  background: `${theme.accentColor}18`,
-                }}
+                style={{ color: theme.accentColor, background: `${theme.accentColor}18` }}
               >
                 {line.highlight}
               </span>
@@ -542,15 +656,11 @@ function ThemePreview({ theme }: { theme: ThemeOption }) {
           ))}
         </div>
       </div>
-
-      {/* Bottom bar */}
       <div
         className="px-5 py-3 flex items-center justify-between border-t"
         style={{ borderColor: `${theme.accentColor}30`, background: `${theme.accentColor}08` }}
       >
-        <span className="text-[12px] font-medium" style={{ color: theme.accentColor }}>
-          {theme.label}
-        </span>
+        <span className="text-[12px] font-medium" style={{ color: theme.accentColor }}>{theme.label}</span>
         <div className="flex items-center gap-2">
           <div className="h-1 w-20 rounded-full bg-white/10">
             <div className="h-full w-1/2 rounded-full" style={{ background: theme.accentColor }} />
@@ -562,7 +672,7 @@ function ThemePreview({ theme }: { theme: ThemeOption }) {
   );
 }
 
-// ─── Step 3: Background Selection ────────────────────────────────────────────
+// ─── Step 3: Background Selection ─────────────────────────────────────────────
 
 function BackgroundStep({
   selected,
@@ -584,13 +694,10 @@ function BackgroundStep({
   const selectedBg = BACKGROUNDS.find((b) => b.id === selected) || BACKGROUNDS[0];
   const selectedTheme = THEMES.find((t) => t.id === theme) || THEMES[2];
 
-  if (submitting) {
-    return <QueueScreen />;
-  }
+  if (submitting) return <QueueScreen />;
 
   return (
     <div className="grid md:grid-cols-[1fr_1.4fr] gap-8">
-      {/* Left: background grid */}
       <div>
         <div className="mb-8">
           <h1 className="text-[32px] font-bold text-white leading-tight mb-2">
@@ -623,7 +730,6 @@ function BackgroundStep({
           ))}
         </div>
 
-        {/* Labels row */}
         <div className="grid grid-cols-5 gap-2 mb-6">
           {BACKGROUNDS.map((bg) => (
             <div key={bg.id} className="text-center text-[8px] text-[var(--text-muted)] truncate px-0.5">
@@ -656,20 +762,15 @@ function BackgroundStep({
         </div>
       </div>
 
-      {/* Right: preview */}
       <div className="hidden md:flex items-center justify-center">
         <div
           className="w-full aspect-video rounded-2xl border border-white/10 overflow-hidden relative shadow-[0_30px_80px_-20px_rgba(0,0,0,0.6)]"
           style={{ background: selectedBg.css }}
         >
-          {/* Simulated video content over background */}
           <div className="absolute inset-0 flex flex-col items-center justify-center p-8">
             <div
               className="w-full max-w-sm rounded-xl p-5 border"
-              style={{
-                background: `${selectedTheme.preview.bg}cc`,
-                borderColor: `${selectedTheme.accentColor}40`,
-              }}
+              style={{ background: `${selectedTheme.preview.bg}cc`, borderColor: `${selectedTheme.accentColor}40` }}
             >
               <div className="h-2 w-3/4 rounded-full mb-3" style={{ background: selectedTheme.accentColor, opacity: 0.7 }} />
               <div className="h-1.5 w-full rounded-full mb-2 bg-white/10" />
@@ -677,8 +778,6 @@ function BackgroundStep({
               <div className="h-1.5 w-4/5 rounded-full bg-white/10" />
             </div>
           </div>
-
-          {/* Grid overlay */}
           <div
             className="absolute inset-0 pointer-events-none"
             style={{
@@ -686,8 +785,6 @@ function BackgroundStep({
               backgroundSize: "40px 40px",
             }}
           />
-
-          {/* Bottom label */}
           <div className="absolute bottom-0 inset-x-0 h-10 flex items-center px-4 gap-3" style={{ background: "rgba(0,0,0,0.5)" }}>
             <div className="h-1 flex-1 rounded-full bg-white/10">
               <div className="h-full w-1/3 rounded-full" style={{ background: selectedTheme.accentColor }} />
@@ -705,7 +802,6 @@ function QueueScreen() {
   return (
     <div className="flex items-center justify-center min-h-[60vh]">
       <div className="text-center max-w-md px-5">
-        {/* Pulsing orb */}
         <div className="relative mx-auto mb-8 h-20 w-20">
           <div className="absolute inset-0 rounded-full bg-[var(--accent)]/20 animate-ping" />
           <div className="absolute inset-2 rounded-full bg-[var(--accent)]/30 animate-ping" style={{ animationDelay: "0.2s" }} />
@@ -713,15 +809,11 @@ function QueueScreen() {
             <div className="h-5 w-5 rounded-full bg-white/80 animate-pulse" />
           </div>
         </div>
-
         <h2 className="text-[28px] font-bold text-white mb-3">You're in queue</h2>
         <p className="text-[14px] text-[var(--text-secondary)] leading-relaxed mb-4">
           Your video is being processed. You can close this page and return later to check the progress.
         </p>
-        <p className="text-[12px] text-[var(--text-muted)]">
-          Processing time may vary based on current demand
-        </p>
-
+        <p className="text-[12px] text-[var(--text-muted)]">Processing time may vary based on current demand</p>
         <div className="mt-8 flex items-center justify-center gap-1.5">
           {[0, 1, 2].map((i) => (
             <div
@@ -734,4 +826,4 @@ function QueueScreen() {
       </div>
     </div>
   );
-}
+} 

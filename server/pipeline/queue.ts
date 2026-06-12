@@ -9,21 +9,29 @@ class JobQueue {
 
   enqueue(id: string, fn: JobFn) {
     this.queue.push({ id, fn });
-    this.drain();
+    // Kick off drain only if not already running — the while loop inside handles queued jobs
+    if (!this.running) this.drain();
   }
 
   private async drain() {
-    if (this.running || this.queue.length === 0) return;
+    if (this.running) return;
     this.running = true;
-    const job = this.queue.shift()!;
-    try {
-      await job.fn();
-    } catch (err) {
-      console.error(`Job ${job.id} failed:`, err);
-    } finally {
-      this.running = false;
-      this.drain();
+
+    // Use a while loop instead of recursive this.drain() call.
+    // Recursion caused newly enqueued jobs to never start if enqueue() was called
+    // during the await job.fn() — because running was still true when the recursive
+    // drain() from finally ran, then set running=false, and the new enqueue's drain()
+    // call had already returned early before the job completed.
+    while (this.queue.length > 0) {
+      const job = this.queue.shift()!;
+      try {
+        await job.fn();
+      } catch (err) {
+        console.error(`Job ${job.id} failed:`, err);
+      }
     }
+
+    this.running = false;
   }
 
   subscribe(id: string, listener: SseListener): () => void {
