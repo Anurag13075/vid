@@ -54,7 +54,6 @@ async function buildCut(
   outPath: string,
   overlayFilters: string[]
 ): Promise<void> {
-  // Clamp startSec to clip duration to avoid seeking past end
   const clipDuration = await ffprobe(clipPath);
   const safeStart = Math.min(startSec, Math.max(0, clipDuration - cutDuration - 0.5));
 
@@ -68,15 +67,16 @@ async function buildCut(
   ];
 
   await ffmpeg([
-    "-stream_loop", "-1",
-    "-i", clipPath,
-    "-ss", String(safeStart),  // after -i
+    "-ss", String(safeStart),   // ← BEFORE -i (fast seek, no decode overhead)
+    "-i", clipPath,             // ← stream_loop removed (was causing null exit)
     "-vf", filters.join(","),
     "-t", String(Math.max(cutDuration, 0.5)),
     "-r", "25",
     "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
     "-an", "-y", outPath,
-]);}
+  ]);
+}
+
 // Process one script section into a multi-cut video that matches audio duration
 async function processSectionClips(
   footagePaths: string[],
