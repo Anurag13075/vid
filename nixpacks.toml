@@ -1,19 +1,8 @@
-[variables]
-NIXPACKS_NODE_VERSION = "22.14.0"
-
 [phases.setup]
 nixPkgs = ["nodejs_22", "nodePackages.pnpm"]
 
-[phases.install]
-cmds = [
-  "pnpm install",
-  "cd server && pnpm install"
-]
-
 [phases.build]
-cmds = [
-  "pnpm run build"
-]
+cmds = ["pnpm install --frozen-lockfile && pnpm run build"]
 
 [start]
-cmd = "pnpm run start"
+cmd = "node .output/server/index.mjs"
