@@ -1,8 +1,10 @@
 [build]
 builder = "nixpacks"
-buildCommand = "pip install edge-tts && pnpm install --frozen-lockfile && pnpm run build"
 
 [deploy]
 startCommand = "tsx server/prod.ts"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+
+[[services]]
+name = "vidrush"
