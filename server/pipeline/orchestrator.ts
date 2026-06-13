@@ -148,8 +148,8 @@ async function runPipeline(videoId: string) {
     // Pre-initialize results array
     const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
 
-    // Hard cap per section: search (20s) + download 3 clips (25s each) = ~35s max
-    const SECTION_HARD_CAP_MS = 35_000;
+    // Hard cap per section: search + download 3 clips at ~25s each = up to 90s
+    const SECTION_HARD_CAP_MS = 90_000;
 
     // Process in parallel batches of 2 to limit concurrent network pressure
     const BATCH_SIZE = 2;
@@ -190,7 +190,7 @@ async function runPipeline(videoId: string) {
           // slow/hanging section from stalling the whole pipeline
           const sectionWork = async () => {
             try {
-              const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
+              const foundClips = await findMultipleFootage(section, 5, videoId, usedIds);
 
               if (foundClips.length > 0) {
                 // Download clips with individual timeouts (20s each in footageAgent)

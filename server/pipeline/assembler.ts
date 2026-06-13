@@ -129,7 +129,8 @@ async function processSectionClips(
   section: ScriptSection,
   sectionIndex: number,
   tmpDir: string,
-  videoTitle?: string
+  videoTitle?: string,
+  baseTimeOffset = 0          // stagger borrowed clips so different sections show different content
 ): Promise<{ outputPath: string; duration: number }> {
   const audioDuration = await ffprobe(audioPath);
   const totalDuration = Math.max(audioDuration + 0.3, 1.0);
@@ -146,7 +147,9 @@ async function processSectionClips(
 
     const clipIdx = cut % footagePaths.length;
     const loopRound = Math.floor(cut / footagePaths.length);
-    const startSec = (loopRound * (CUT_SECS + 3)) % 25;
+    // baseTimeOffset shifts where borrowed clips start so adjacent sections
+    // that share the same footage pool show visually distinct content
+    const startSec = (baseTimeOffset + loopRound * (CUT_SECS + 3)) % 30;
 
     const outPath = path.join(tmpDir, `s${sectionIndex}_cut${cut}.mp4`);
     const overlays = buildOverlays(section, cut, cut === 0 ? videoTitle : undefined);
@@ -353,20 +356,51 @@ export async function assemble(
   const sectionDurations: number[] = [];
   const validAudio: string[] = [];
 
+  // Build a global pool of every downloaded clip path so sections that failed
+  // footage download can borrow real footage instead of showing black.
+  const globalClipPool: string[] = [];
+  for (const paths of footagePathsPerSection) {
+    if (paths) {
+      for (const p of paths) {
+        if (!globalClipPool.includes(p)) globalClipPool.push(p);
+      }
+    }
+  }
+
+  // Resolve footage for each section — use global pool as fallback, never black
+  const resolveFootage = (i: number): { paths: string[]; baseOffset: number } => {
+    const own = footagePathsPerSection[i];
+    if (own && own.length > 0) return { paths: own, baseOffset: 0 };
+
+    if (globalClipPool.length === 0) return { paths: [], baseOffset: 0 };
+
+    // Borrow from global pool at a section-specific stagger (8s per section)
+    // so adjacent sections that share the pool show visually different content
+    const POOL_STRIDE = 3;
+    const offset = (i * POOL_STRIDE) % globalClipPool.length;
+    const N = Math.min(5, globalClipPool.length);
+    const borrowed: string[] = [];
+    for (let k = 0; k < N; k++) {
+      borrowed.push(globalClipPool[(offset + k) % globalClipPool.length]);
+    }
+    const baseOffset = (i * 8) % 30; // shift start time within clip
+    console.log(`Section ${i}: no footage, borrowing ${borrowed.length} clips from pool (offset=${baseOffset}s)`);
+    return { paths: borrowed, baseOffset };
+  };
+
   for (let i = 0; i < sections.length; i++) {
     const section = sections[i];
     const audioPath = audioPaths[i];
     if (!audioPath) continue;
 
-    const footage = footagePathsPerSection[i];
+    const { paths: footage, baseOffset } = resolveFootage(i);
 
-    if (!footage || footage.length === 0) {
-      // Black fallback clip when no footage was found
+    if (footage.length === 0) {
+      // Absolute last resort: black clip (only if pool is also empty)
       const dur = Math.max((await ffprobe(audioPath)) + 0.3, 1.0);
       const fallbackPath = path.join(tmpDir, `black_${i}.mp4`);
       await ffmpeg([
-        "-f", "lavfi",
-        "-i", `color=c=black:size=1280x720:rate=25`,
+        "-f", "lavfi", "-i", "color=c=black:size=1280x720:rate=25",
         "-t", String(dur),
         "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
         "-an", "-y", fallbackPath,
@@ -384,26 +418,43 @@ export async function assemble(
         section,
         i,
         tmpDir,
-        i === 0 ? videoTitle : undefined
+        i === 0 ? videoTitle : undefined,
+        baseOffset
       );
       sectionVideos.push(outputPath);
       sectionDurations.push(duration);
       validAudio.push(audioPath);
     } catch (err) {
-      // If a section fails, fall back to a black clip so we don't abort everything
-      console.error(`Section ${i} render failed, using black fallback:`, err);
-      const dur = Math.max((await ffprobe(audioPath).catch(() => 5)) + 0.3, 1.0);
-      const fallbackPath = path.join(tmpDir, `black_fallback_${i}.mp4`);
-      await ffmpeg([
-        "-f", "lavfi",
-        "-i", `color=c=black:size=1280x720:rate=25`,
-        "-t", String(dur),
-        "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-        "-an", "-y", fallbackPath,
-      ]);
-      sectionVideos.push(fallbackPath);
-      sectionDurations.push(dur);
-      validAudio.push(audioPath);
+      console.error(`Section ${i} render failed, retrying with fewer clips:`, err);
+      // Retry with just the first clip — simpler filtergraph, very unlikely to fail
+      try {
+        const { outputPath, duration } = await processSectionClips(
+          [footage[0]],
+          audioPath,
+          section,
+          i,
+          tmpDir,
+          undefined,
+          baseOffset
+        );
+        sectionVideos.push(outputPath);
+        sectionDurations.push(duration);
+        validAudio.push(audioPath);
+      } catch (err2) {
+        console.error(`Section ${i} retry also failed:`, err2);
+        // True last resort: silent black
+        const dur = Math.max((await ffprobe(audioPath).catch(() => 5)) + 0.3, 1.0);
+        const fallbackPath = path.join(tmpDir, `black_fallback_${i}.mp4`);
+        await ffmpeg([
+          "-f", "lavfi", "-i", "color=c=black:size=1280x720:rate=25",
+          "-t", String(dur),
+          "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+          "-an", "-y", fallbackPath,
+        ]);
+        sectionVideos.push(fallbackPath);
+        sectionDurations.push(dur);
+        validAudio.push(audioPath);
+      }
     }
   }
 

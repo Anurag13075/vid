@@ -7,15 +7,25 @@ export function createClipTracker(): Set<string> {
 }
 
 // ─── Pick the best HD video file from Pexels ────────────────────────────────
-// Pexels returns video_files sorted highest quality first (often 4K).
-// We want 720p or 1080p — close to 1280 width.
 function pickBestPexelsFile(videoFiles: any[]): string {
   const valid = (videoFiles || []).filter((f: any) => f?.link && f?.width);
   if (valid.length === 0) return "";
-  // Sort by closeness to 1280 wide (720p target)
+  // Prefer closest to 1280 wide (720p target)
   valid.sort((a: any, b: any) => Math.abs(a.width - 1280) - Math.abs(b.width - 1280));
   return valid[0].link;
 }
+
+// ─── Generic fallback keywords when specific ones return nothing ─────────────
+const FALLBACK_KEYWORDS = [
+  "cinematic landscape",
+  "aerial city view",
+  "documentary footage",
+  "dramatic sky timelapse",
+  "nature wildlife closeup",
+  "ocean waves sunset",
+  "mountain forest path",
+  "urban architecture abstract",
+];
 
 // ─── Search Pexels for footage clips ────────────────────────────────────────
 export async function findMultipleFootage(
@@ -26,8 +36,13 @@ export async function findMultipleFootage(
 ): Promise<Clip[]> {
   const clips: Clip[] = [];
 
-  // Try each visual keyword until we have enough clips
-  for (const keyword of section.visual_keywords) {
+  // Build keyword list: section keywords first, then generic fallbacks
+  const keywords = [
+    ...section.visual_keywords,
+    ...FALLBACK_KEYWORDS,
+  ];
+
+  for (const keyword of keywords) {
     if (clips.length >= limit) break;
     const needed = limit - clips.length;
 
@@ -35,8 +50,9 @@ export async function findMultipleFootage(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 15_000);
 
+      // Request 4× needed so we have room to skip already-used IDs
       const response = await fetch(
-        `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=${needed * 3}&orientation=landscape`,
+        `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=${Math.min(needed * 4, 20)}&orientation=landscape`,
         {
           headers: { Authorization: process.env.PEXELS_API_KEY || "" },
           signal: controller.signal,
@@ -45,7 +61,7 @@ export async function findMultipleFootage(
       clearTimeout(timer);
 
       if (!response.ok) {
-        console.warn(`Pexels search failed for "${keyword}": ${response.status}`);
+        console.warn(`Pexels "${keyword}": ${response.status}`);
         continue;
       }
 
@@ -73,9 +89,9 @@ export async function findMultipleFootage(
       }
     } catch (err: any) {
       if (err?.name === "AbortError") {
-        console.warn(`Pexels search timed out for "${keyword}"`);
+        console.warn(`Pexels timed out: "${keyword}"`);
       } else {
-        console.error(`Footage search failed for "${keyword}":`, err);
+        console.error(`Footage search error for "${keyword}":`, err);
       }
     }
   }
@@ -97,7 +113,7 @@ export async function downloadClip(
   if (!url) throw new Error("Clip has no videoUrl");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000); // 60s max per clip
+  const timer = setTimeout(() => controller.abort(), 60_000);
 
   try {
     const response = await fetch(url, { signal: controller.signal });
@@ -107,17 +123,16 @@ export async function downloadClip(
       throw new Error(`Download failed: ${response.status} ${response.statusText}`);
     }
 
-    // Use arrayBuffer() — works in both Bun and Node without stream compat issues
     const buffer = await response.arrayBuffer();
     if (buffer.byteLength < 1000) {
-      throw new Error(`Downloaded file is too small (${buffer.byteLength} bytes) — likely an error response`);
+      throw new Error(`Downloaded file too small (${buffer.byteLength} B) — likely an error response`);
     }
     await fs.writeFile(outPath, Buffer.from(buffer));
     return outPath;
   } catch (err: any) {
     clearTimeout(timer);
     if (err?.name === "AbortError") {
-      throw new Error(`Download timed out after 60s for: ${url}`);
+      throw new Error(`Download timed out after 60s: ${url}`);
     }
     throw err;
   }
