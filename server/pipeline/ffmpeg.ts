@@ -1,27 +1,49 @@
 import { spawn } from "child_process";
 import ffmpegStatic from "ffmpeg-static";
 
-const FFMPEG_PATH = ffmpegStatic || "ffmpeg";
-const FFPROBES: string[] = ["ffprobe", "ffprobe-static", "ffprobe-static/bin/ffprobe"];
+// Prefer system ffmpeg (from nix) if available; fall back to npm bundle
+const FFMPEG_PATH = (() => {
+  try {
+    const { execSync } = require("child_process");
+    const which = execSync("which ffmpeg", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+    if (which) return which;
+  } catch {}
+  return (ffmpegStatic as string | null) || "ffmpeg";
+})();
 
-function runProcess(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+// 10 minutes — enough for any single ffmpeg operation in the pipeline
+const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
+
+function runProcess(
+  command: string,
+  args: string[]
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
 
-    proc.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
-    proc.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    proc.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error(`${command} timed out after ${FFMPEG_TIMEOUT_MS / 1000}s`));
+    }, FFMPEG_TIMEOUT_MS);
 
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
-        reject(new Error(`${command} exited with code ${code}: ${stderr.slice(-2000)}`));
+        reject(new Error(`${command} exited with code ${code}: ${stderr.slice(-3000)}`));
       }
     });
 
     proc.on("error", (err) => {
+      clearTimeout(timer);
       reject(err);
     });
   });
@@ -32,12 +54,13 @@ export async function ffmpeg(args: string[]): Promise<void> {
     await runProcess(FFMPEG_PATH, args);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`FFmpeg failed: ${message}\nCommand: ${FFMPEG_PATH} ${args.join(" ")}`);
+    throw new Error(`FFmpeg failed: ${message}\nCommand: ffmpeg ${args.join(" ")}`);
   }
 }
 
-async function probeWithBinary(binary: string, filePath: string): Promise<number> {
-  const { stdout } = await runProcess(binary, [
+// ─── ffprobe: try system binary first, then fallback via ffmpeg -i ────────────
+async function probeWithFfprobe(filePath: string): Promise<number> {
+  const { stdout } = await runProcess("ffprobe", [
     "-v", "error",
     "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1",
@@ -47,35 +70,37 @@ async function probeWithBinary(binary: string, filePath: string): Promise<number
   return Number.isFinite(sec) && sec > 0 ? sec : 0;
 }
 
-async function probeWithFallback(filePath: string): Promise<number> {
-  const { stderr } = await runProcess(FFMPEG_PATH, [
-    "-hide_banner",
-    "-loglevel", "error",
-    "-i", filePath,
-    "-f", "null",
-    "-",
-  ]);
+async function probeWithFfmpegFallback(filePath: string): Promise<number> {
+  // ffmpeg -i prints duration to stderr even though it "fails" (no output file)
+  let stderr = "";
+  try {
+    await runProcess(FFMPEG_PATH, [
+      "-hide_banner", "-loglevel", "error",
+      "-i", filePath,
+      "-f", "null", "-",
+    ]);
+  } catch (err) {
+    stderr = err instanceof Error ? err.message : String(err);
+  }
 
   const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/i);
   if (!match) return 0;
-  const [, hours, minutes, seconds] = match;
-  return Number(hours) * 3600 + Number(minutes) * 60 + parseFloat(seconds);
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + parseFloat(match[3]);
 }
 
 export async function ffprobe(filePath: string): Promise<number> {
-  for (const binary of ["ffprobe", FFMPEG_PATH]) {
-    try {
-      if (binary === FFMPEG_PATH) {
-        const duration = await probeWithFallback(filePath);
-        if (duration > 0) return duration;
-      } else {
-        const duration = await probeWithBinary(binary, filePath);
-        if (duration > 0) return duration;
-      }
-    } catch {
-      continue;
-    }
-  }
+  // Try ffprobe binary
+  try {
+    const dur = await probeWithFfprobe(filePath);
+    if (dur > 0) return dur;
+  } catch {}
 
-  return 0;
+  // Fall back to parsing ffmpeg -i stderr
+  try {
+    const dur = await probeWithFfmpegFallback(filePath);
+    if (dur > 0) return dur;
+  } catch {}
+
+  console.warn(`ffprobe: could not determine duration for ${filePath}, defaulting to 5s`);
+  return 5;
 }
