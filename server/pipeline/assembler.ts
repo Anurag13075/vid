@@ -14,7 +14,8 @@ const BGM_VOLUME = 0.12;
 const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
 const CRF = 23;
-const PRESET = "slow";
+const PRESET = "veryfast";
+const FFMPEG_THREADS = 2;
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
@@ -136,7 +137,7 @@ async function renderCut(
 
   const kenBurnsFilter = buildKenBurnsFilter(motionType, durationSec);
   // Color grade applied AFTER crop/scale so it runs on 1920x1080 not the oversize frame
-  const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20,unsharp=3:3:0.6`;
+  const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20`;
   const fullFilter = `${kenBurnsFilter},${gradeFilter},format=yuv420p`;
 
   console.log(`[assembler] cut (${motionType}) ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
@@ -150,11 +151,12 @@ async function renderCut(
     "-vf", fullFilter,
     "-t", String(durationSec),
     "-r", String(FPS),
-    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET, "-threads", String(FFMPEG_THREADS),
     "-an",
     "-y", outPath,
   ]);
 }
+
 
 // ─── Split a section into fast cuts ─────────────────────────────────────────
 // Given total audio duration for a section, returns an array of cut durations
@@ -273,12 +275,13 @@ async function xfadeBatch(
     ...inputs,
     "-filter_complex", filterGraph,
     "-map", "[vout]",
-    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET, "-threads", String(FFMPEG_THREADS),
     "-r", String(FPS),
     "-an",
     "-y", outputPath,
   ]);
 }
+
 
 async function chainXfadeTransitions(
   clipPaths: string[],
@@ -371,7 +374,7 @@ async function finalMixWithCaptions(
 
   const videoFilterArgs = captionFilter ? ["-vf", captionFilter] : [];
   const videoCodecArgs = captionFilter
-    ? ["-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET]
+    ? ["-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET, "-threads", String(FFMPEG_THREADS)]
     : ["-c:v", "copy"];
 
   if (bgmPath) {
@@ -426,7 +429,7 @@ async function makeBlackClip(outPath: string, durationSec: number): Promise<void
   await ffmpeg([
     "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
     "-t", String(durationSec),
-    "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+    "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast", "-threads", String(FFMPEG_THREADS),
     "-an", "-y", outPath,
   ]);
 }
