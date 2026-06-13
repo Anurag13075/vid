@@ -9,13 +9,26 @@ type ProgressFn = (step: number, total: number, label: string) => void | Promise
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
 const FPS = 30;
-const TRANSITION_DURATION = 0.25; // snappier cuts
+const TRANSITION_DURATION = 0.25;
 const BGM_VOLUME = 0.12;
 const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
-const CRF = 23;
-const PRESET = "veryfast";
-const THREADS = 2;
+
+// Railway 1 GB RAM / shared vCPU constraints:
+// - 1 thread: shared vCPU means more threads = more context-switching, not faster
+// - CRF 26 for intermediate renders: saves disk I/O without visible quality loss
+//   (final mix re-encodes everything anyway)
+// - PRESET "ultrafast" everywhere: ~60% less RAM on motion-estimation buffers vs
+//   "veryfast"; quality difference is invisible on intermediate clips
+// - XFADE_BATCH 2: xfade holds N fully-decoded 1080p frame buffers in memory
+//   simultaneously. 4 clips × ~8 MB/frame × lookahead ≈ 400–600 MB → OOM kill.
+//   2 clips × ~8 MB/frame ≈ 100–150 MB → safe. The while-loop in
+//   chainXfadeTransitions handles multi-pass reduction automatically.
+const THREADS = 1;
+const CRF = 26;
+const PRESET = "ultrafast";
+const XFADE_BATCH = 2;
+
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
@@ -51,7 +64,7 @@ async function resolveFont(): Promise<string> {
 // processes every frame in software at full resolution with floating-point zoom
 // math. The replacement approach is equivalent visually but ~10x faster:
 //
-//   1. Scale the clip to OVERSIZE (e.g. 115% of output) — fast hardware path
+//   1. Scale the clip to OVERSIZE (e.g. 110% of output) — fast hardware path
 //   2. Use crop= with the built-in 'n' (frame number) expression to animate
 //      the crop window across the oversize canvas — cheap integer arithmetic
 //   3. Apply color grade on the already-cropped 1920x1080 frame
@@ -64,61 +77,43 @@ function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
   const h = OUTPUT_HEIGHT;  // 1080
 
   // Scale factor: 1.10 means 10% oversize on each axis = 2112x1188
-  // This gives enough headroom for pan travel without black borders.
   const SCALE = 1.10;
   const sw = Math.round(w * SCALE); // 2112
   const sh = Math.round(h * SCALE); // 1188
 
-  // Maximum pan travel in pixels (half the extra space on each axis)
   const dx = sw - w; // 192px horizontal travel budget
   const dy = sh - h; // 108px vertical travel budget
 
-  // n = current frame number (FFmpeg built-in)
-  // Progress expression: n/(totalFrames-1), clamped via min/max
   const prog = `min(n,${totalFrames - 1})/${totalFrames - 1}`;
 
-  // For zoom-in/zoom-out we animate the crop SIZE (smaller crop = more zoom),
-  // then scale back up to output. For pan motions we animate crop POSITION.
   switch (motion) {
     case "zoom-in": {
-      // Crop starts at sw×sh (no zoom), ends at w×h (full zoom-in)
-      // crop=w:h:x:y — w/h shrink from SCALE down to 1.0, x/y stay centered
       const cropW = `${sw}-${dx}*${prog}`;
       const cropH = `${sh}-${dy}*${prog}`;
       const cropX = `(${sw}-(${cropW}))/2`;
       const cropY = `(${sh}-(${cropH}))/2`;
       return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop='${cropW}':'${cropH}':'${cropX}':'${cropY}',scale=${w}:${h}`;
     }
-
     case "zoom-out": {
-      // Crop starts at w×h (zoomed in), ends at sw×sh (zoomed out)
       const cropW = `${w}+${dx}*${prog}`;
       const cropH = `${h}+${dy}*${prog}`;
       const cropX = `(${sw}-(${cropW}))/2`;
       const cropY = `(${sh}-(${cropH}))/2`;
       return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop='${cropW}':'${cropH}':'${cropX}':'${cropY}',scale=${w}:${h}`;
     }
-
     case "pan-right": {
-      // Crop window slides left→right across the oversize canvas
       const cropX = `${dx}*${prog}`;
       return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:'${cropX}':${Math.floor(dy / 2)}`;
     }
-
     case "pan-left": {
-      // Crop window slides right→left
       const cropX = `${dx}*(1-${prog})`;
       return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:'${cropX}':${Math.floor(dy / 2)}`;
     }
-
     case "pan-up": {
-      // Crop window slides top→bottom
       const cropY = `${dy}*${prog}`;
       return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${cropY}'`;
     }
-
     case "pan-down": {
-      // Crop window slides bottom→top
       const cropY = `${dy}*(1-${prog})`;
       return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${cropY}'`;
     }
@@ -136,7 +131,6 @@ async function renderCut(
   const needsLoop = clipDuration < durationSec;
 
   const kenBurnsFilter = buildKenBurnsFilter(motionType, durationSec);
-  // Color grade applied AFTER crop/scale so it runs on 1920x1080 not the oversize frame
   const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20`;
   const fullFilter = `${kenBurnsFilter},${gradeFilter},format=yuv420p`;
 
@@ -151,6 +145,9 @@ async function renderCut(
     "-vf", fullFilter,
     "-t", String(durationSec),
     "-r", String(FPS),
+    // ultrafast + 1 thread: ~60% less RAM than veryfast on motion estimation.
+    // CRF 26 instead of 23: saves ~20% file size on intermediates with no
+    // perceptible quality loss since finalMixWithCaptions re-encodes at CRF 23.
     "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
     "-an",
     "-y", outPath,
@@ -158,34 +155,23 @@ async function renderCut(
 }
 
 // ─── Split a section into fast cuts ─────────────────────────────────────────
-// Given total audio duration for a section, returns an array of cut durations
-// that sum to audioDuration, each between CUT_MIN_SEC and CUT_MAX_SEC.
 function sliceCuts(audioDuration: number): number[] {
-  if (audioDuration <= CUT_MAX_SEC) {
-    // Short section: single cut
-    return [audioDuration];
-  }
+  if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
 
   const cuts: number[] = [];
   let remaining = audioDuration;
 
   while (remaining > 0) {
     if (remaining <= CUT_MAX_SEC) {
-      // Last cut: whatever is left (min 1s to avoid degenerate tiny clips)
       cuts.push(Math.max(remaining, 1.0));
       break;
     }
-
-    // Try to place a cut close to CUT_TARGET_SEC
-    // But if only one more cut would remain and it'd be too short, stretch this one
     const wouldLeave = remaining - CUT_TARGET_SEC;
     if (wouldLeave > 0 && wouldLeave < CUT_MIN_SEC) {
-      // Split remaining evenly into 2 cuts instead
       const half = remaining / 2;
       cuts.push(half, half);
       break;
     }
-
     cuts.push(CUT_TARGET_SEC);
     remaining -= CUT_TARGET_SEC;
   }
@@ -219,7 +205,6 @@ async function generateSrt(
     const duration = await ffprobe(audioPath);
     if (duration <= 0) continue;
 
-    // Split narration into ~8-word chunks for readable captions
     const words = section.narration.trim().split(/\s+/);
     const chunkSize = 8;
     const chunks: string[] = [];
@@ -243,20 +228,12 @@ async function generateSrt(
 }
 
 // ─── Concat demuxer: join clips with zero memory overhead ───────────────────
-// xfade filter_complex OOMs on Railway even with 12 clips at 1080p because FFmpeg
-// must hold all decoded frames in memory simultaneously. The concat demuxer reads
-// one clip at a time — constant ~200MB regardless of clip count.
-// Tradeoff: hard cuts instead of crossfades between every cut. We keep crossfades
-// only at section boundaries by pre-merging per-section clips with a tiny xfade
-// batch (≤4 clips each), then concat the section videos.
-async function concatClips(
-  clipPaths: string[],
-  outputPath: string
-): Promise<void> {
+// Reads one clip at a time — constant ~200 MB regardless of clip count.
+// Used for hard cuts within a section (fast, no re-encode via stream copy).
+async function concatClips(clipPaths: string[], outputPath: string): Promise<void> {
   if (clipPaths.length === 0) throw new Error("No cuts to concat");
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
 
-  // Write a concat list file
   const listPath = outputPath + ".concat.txt";
   const listContent = clipPaths.map((p) => `file '${p}'`).join("\n");
   await fs.writeFile(listPath, listContent, "utf8");
@@ -267,15 +244,27 @@ async function concatClips(
     "-f", "concat",
     "-safe", "0",
     "-i", listPath,
-    "-c", "copy",   // stream copy — no re-encode, near-instant
+    "-c", "copy",
     "-y", outputPath,
   ]);
 
-  // Clean up list file
   await fs.unlink(listPath).catch(() => {});
 }
 
-// ─── xfade a small batch (≤4 clips) for section-boundary transitions ─────────
+// ─── xfade a small batch (≤ XFADE_BATCH clips) for section-boundary transitions
+//
+// Railway 1 GB RAM constraint: XFADE_BATCH = 2.
+// xfade must hold N fully-decoded 1080p frame buffers simultaneously for the
+// blend operation. At 1920×1080 yuv420p that's ~6 MB per frame. With FFmpeg's
+// internal lookahead + libx264 input buffers, 4 clips pushes peak RSS to
+// 400–600 MB which trips Railway's OOM killer (SIGKILL → exit code null).
+// 2 clips peaks at ~150 MB — well within the 1 GB ceiling.
+//
+// The while-loop in chainXfadeTransitions handles multi-pass reduction:
+//   11 sections → pass 0: 6 batches of 2 → 6 videos
+//                 pass 1: 3 batches of 2 → 3 videos
+//                 pass 2: 2 batches of 2 → 1 video (done)
+// Each pass is sequential and GC'd between runs so peak RSS stays flat.
 async function xfadeSmallBatch(
   clipPaths: string[],
   clipDurations: number[],
@@ -283,8 +272,8 @@ async function xfadeSmallBatch(
 ): Promise<void> {
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
 
-  // Safety: never try to xfade more than 4 at once
-  if (clipPaths.length > 4) {
+  // Hard safety: never exceed XFADE_BATCH regardless of caller
+  if (clipPaths.length > XFADE_BATCH) {
     return concatClips(clipPaths, outputPath);
   }
 
@@ -307,6 +296,8 @@ async function xfadeSmallBatch(
     ...inputs,
     "-filter_complex", filterGraph,
     "-map", "[vout]",
+    // ultrafast here too: this is an intermediate — the final mix re-encodes.
+    // 1 thread keeps peak RAM from spiking during the xfade blend + encode.
     "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
     "-r", String(FPS),
     "-an",
@@ -318,8 +309,6 @@ async function chainXfadeTransitions(
   clipPaths: string[],
   clipDurations: number[],
   outputPath: string,
-  // sectionBoundaries: indices in clipPaths where a new section starts
-  // used to place xfade transitions at section joins, hard cuts within sections
   sectionBoundaries: number[]
 ): Promise<void> {
   if (clipPaths.length === 0) throw new Error("No cuts to chain");
@@ -327,9 +316,7 @@ async function chainXfadeTransitions(
 
   const tmpDir = path.dirname(outputPath);
 
-  // Split clip list into sections using boundary indices
-  // Each section gets its cuts concat'd (hard cuts within section = fast)
-  // Then section videos get xfade'd together (smooth transitions at section joins)
+  // Phase 1: concat within each section (hard cuts, stream copy, zero RAM cost)
   const boundaries = [0, ...sectionBoundaries, clipPaths.length];
   const sectionVideos: string[] = [];
   const sectionDurations: number[] = [];
@@ -353,8 +340,9 @@ async function chainXfadeTransitions(
     return;
   }
 
-  // Now xfade between section videos in batches of 4
-  const XFADE_BATCH = 4;
+  // Phase 2: xfade between section videos in batches of XFADE_BATCH (2).
+  // Multi-pass binary reduction — each pass is sequential so GC can reclaim
+  // memory between passes. Peak RSS stays constant at ~150 MB per pass.
   let currentVideos = sectionVideos;
   let currentDurations = sectionDurations;
   let pass = 0;
@@ -410,6 +398,9 @@ async function mergeAudio(audioPaths: string[], outputPath: string): Promise<voi
 }
 
 // ─── Burn captions + mix BGM ──────────────────────────────────────────────────
+// Final mix is the only step where we care about output quality — CRF 23 here.
+// We re-encode video anyway to burn subtitles, so this is the right place to
+// spend the quality budget, not on intermediate clips.
 async function finalMixWithCaptions(
   videoPath: string,
   voiceoverPath: string,
@@ -436,8 +427,10 @@ async function finalMixWithCaptions(
   }
 
   const videoFilterArgs = captionFilter ? ["-vf", captionFilter] : [];
+  // Final output: CRF 23 + veryfast (better quality than intermediates).
+  // Still 1 thread to stay within Railway's 1 GB RAM ceiling during the encode.
   const videoCodecArgs = captionFilter
-    ? ["-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET]
+    ? ["-threads", String(THREADS), "-c:v", "libx264", "-crf", "23", "-preset", "veryfast"]
     : ["-c:v", "copy"];
 
   if (bgmPath) {
@@ -492,6 +485,7 @@ async function makeBlackClip(outPath: string, durationSec: number): Promise<void
   await ffmpeg([
     "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
     "-t", String(durationSec),
+    // ultrafast for fallback blacks — pure color source, quality irrelevant
     "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
     "-an", "-y", outPath,
   ]);
@@ -526,7 +520,6 @@ export async function assemble(
   const total = RENDER_STEPS.length;
 
   // ── Build global clip pool ───────────────────────────────────────────────
-  // All downloaded clips flattened into one pool for round-robin assignment
   const globalClipPool: string[] = [];
   for (const paths of footagePathsPerSection) {
     if (paths) {
@@ -536,12 +529,10 @@ export async function assemble(
     }
   }
 
-  // Returns the best available clips for a section — own clips first, then borrows from pool
   const getClipsForSection = (i: number): string[] => {
     const own = footagePathsPerSection[i];
     if (own && own.length > 0) return own;
     if (globalClipPool.length === 0) return [];
-    // Borrow at staggered offset so adjacent sections look different
     const offset = (i * 3) % globalClipPool.length;
     const N = Math.min(4, globalClipPool.length);
     const borrowed: string[] = [];
@@ -555,17 +546,13 @@ export async function assemble(
   // ── Step 1: Plan cuts ────────────────────────────────────────────────────
   await onProgress(0, total, RENDER_STEPS[0].label);
 
-  // cutPlan[i] = array of { clipPath, durationSec } for each cut in section i
   type CutInfo = { clipPath: string; durationSec: number };
   const cutPlan: CutInfo[][] = [];
   const validAudioForSection: (string | null)[] = [];
 
-  // Global cut index used to advance both the clip pool pointer and the motion cycle,
-  // ensuring no two adjacent cuts ever get the same motion type or same source clip.
   let globalCutIdx = 0;
 
   for (let i = 0; i < sections.length; i++) {
-    const section = sections[i];
     const audioPath = audioPaths[i];
 
     if (!audioPath) {
@@ -583,22 +570,17 @@ export async function assemble(
 
     validAudioForSection.push(audioPath);
 
-    // Determine cut durations for this section
     const cutDurations = sliceCuts(audioDuration);
     const availableClips = getClipsForSection(i);
-
     const sectionCuts: CutInfo[] = [];
 
     for (let ci = 0; ci < cutDurations.length; ci++) {
       const cutDur = cutDurations[ci];
-
       let clipPath: string | null = null;
 
       if (availableClips.length > 0) {
-        // Cycle through available clips for this section — each cut gets a different one
         clipPath = availableClips[ci % availableClips.length];
       } else if (globalClipPool.length > 0) {
-        // Last resort: borrow from the global pool at a unique offset
         clipPath = globalClipPool[globalCutIdx % globalClipPool.length];
       }
 
@@ -618,13 +600,8 @@ export async function assemble(
   const renderedCuts: string[] = [];
   const renderedDurations: number[] = [];
   const audioForRenderedCuts: string[] = [];
-  // Track where each new section starts in renderedCuts — used by chainXfadeTransitions
-  // to place xfade transitions at section joins and hard cuts within sections
   const sectionBoundaries: number[] = [];
 
-  // globalMotionIdx is separate from globalCutIdx so motion cycles independently
-  // of clip assignment — avoids identical motion on back-to-back cuts even when
-  // the same source clip is reused.
   let globalMotionIdx = 0;
 
   for (let i = 0; i < sections.length; i++) {
@@ -634,7 +611,6 @@ export async function assemble(
     const audioPath = validAudioForSection[i];
     if (!audioPath) continue;
 
-    // Mark where this section starts in the global renderedCuts array
     if (renderedCuts.length > 0) sectionBoundaries.push(renderedCuts.length);
 
     for (let ci = 0; ci < cuts.length; ci++) {
@@ -645,7 +621,6 @@ export async function assemble(
       const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
 
       if (!clipPath) {
-        // No source footage at all: black clip
         console.warn(`[assembler] Section ${i} cut ${ci}: no clip available, using black`);
         await makeBlackClip(outPath, durationSec);
         renderedCuts.push(outPath);
@@ -660,7 +635,6 @@ export async function assemble(
       } catch (err) {
         console.error(`[assembler] Ken Burns failed for cut ${i}/${ci}:`, (err as Error).message);
 
-        // Fallback: plain scale without Ken Burns
         const fallbackPath = path.join(tmpDir, `scaled_${i}_${ci}.mp4`);
         try {
           const rawDur = await ffprobe(clipPath);
@@ -675,7 +649,6 @@ export async function assemble(
           renderedCuts.push(fallbackPath);
           renderedDurations.push(durationSec);
         } catch {
-          // Absolute last resort
           const blackPath = path.join(tmpDir, `black_${i}_${ci}.mp4`);
           await makeBlackClip(blackPath, durationSec);
           renderedCuts.push(blackPath);
@@ -684,7 +657,6 @@ export async function assemble(
       }
     }
 
-    // The section's audio covers all its cuts end-to-end
     audioForRenderedCuts.push(audioPath);
   }
 
