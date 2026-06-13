@@ -9,8 +9,8 @@ type ProgressFn = (step: number, total: number, label: string) => void | Promise
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
 const FPS = 30;
-const TRANSITION_DURATION = 0.3;
-const BGM_VOLUME = 0.15;
+const TRANSITION_DURATION = 0.25; // snappier cuts
+const BGM_VOLUME = 0.12;
 const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
 const CRF = 23;
@@ -18,104 +18,78 @@ const PRESET = "slow";
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
-// Ken Burns motion types — alternated per clip for cinematic variety
-type MotionType = "zoom-in" | "zoom-out" | "pan-left" | "pan-right";
-const MOTION_CYCLE: MotionType[] = ["zoom-in", "pan-right", "zoom-out", "pan-left"];
+// Target duration for each individual visual cut (in seconds)
+const CUT_TARGET_SEC = 3.5;
+const CUT_MIN_SEC = 2.5;
+const CUT_MAX_SEC = 5.0;
 
-// ─── Escape text for FFmpeg drawtext / subtitles ─────────────────────────────
-function escapeDrawtext(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\u2019")
-    .replace(/"/g, "")
-    .replace(/:/g, "\\:")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/,/g, "\\,")
-    .replace(/%/g, "")
-    .slice(0, 80);
-}
+// Ken Burns motion types — varied per cut for cinematic energy
+type MotionType = "zoom-in" | "zoom-out" | "pan-left" | "pan-right" | "pan-up" | "pan-down";
+const MOTION_CYCLE: MotionType[] = [
+  "zoom-in",
+  "pan-right",
+  "zoom-out",
+  "pan-left",
+  "zoom-in",
+  "pan-up",
+  "zoom-out",
+  "pan-down",
+];
 
 // ─── Resolve font path ───────────────────────────────────────────────────────
 async function resolveFont(): Promise<string> {
-  try {
-    await fs.access(FONT);
-    return FONT;
-  } catch {
-    try {
-      await fs.access(FONT_FALLBACK);
-      return FONT_FALLBACK;
-    } catch {
-      return "";
-    }
+  for (const f of [FONT, FONT_FALLBACK]) {
+    try { await fs.access(f); return f; } catch {}
   }
+  return "";
 }
 
-// ─── Build Ken Burns zoompan filter string for one clip ──────────────────────
-// We pre-render each clip to a temp file first to avoid zoompan inside
-// a massive filter_complex (which times out on long videos).
+// ─── Build Ken Burns zoompan filter string for one cut ───────────────────────
 function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
-  const totalFrames = Math.ceil(durationSec * FPS);
-  // Scale factor: 1.0 → 1.04 (subtle, cinematic)
-  const scaleStart = 1.0;
-  const scaleEnd = 1.04;
-
-  // zoompan formula: z = zoom expression, x/y = pan expression
-  // d = total frames, s = output size
-  const d = totalFrames;
+  const d = Math.ceil(durationSec * FPS);
   const w = OUTPUT_WIDTH;
   const h = OUTPUT_HEIGHT;
 
-  // Each motion type uses a different zoom/pan combination
+  // Scale up 2x so zoompan has room to pan without black bars
+  const scaleFilter = `scale=${w * 2}:${h * 2}:force_original_aspect_ratio=increase,crop=${w * 2}:${h * 2}`;
+
   switch (motion) {
     case "zoom-in":
-      // Slowly zoom in from center
-      return [
-        `scale=${w * 2}:${h * 2}`,
-        `zoompan=z='${scaleStart}+on/${d}*${scaleEnd - scaleStart}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`,
-      ].join(",");
+      return `${scaleFilter},zoompan=z='1.0+on/${d}*0.06':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`;
 
     case "zoom-out":
-      // Start zoomed in, slowly zoom out
-      return [
-        `scale=${w * 2}:${h * 2}`,
-        `zoompan=z='${scaleEnd}-on/${d}*${scaleEnd - scaleStart}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`,
-      ].join(",");
+      return `${scaleFilter},zoompan=z='1.06-on/${d}*0.06':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`;
 
     case "pan-right":
-      // Zoom in slightly while panning right
-      return [
-        `scale=${w * 2}:${h * 2}`,
-        `zoompan=z='${scaleStart}+on/${d}*${(scaleEnd - scaleStart) * 0.5}':x='on/${d}*(iw/zoom/4)':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`,
-      ].join(",");
+      return `${scaleFilter},zoompan=z='1.04':x='on/${d}*(iw/zoom*0.15)':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`;
 
     case "pan-left":
-      // Zoom in slightly while panning left
-      return [
-        `scale=${w * 2}:${h * 2}`,
-        `zoompan=z='${scaleStart}+on/${d}*${(scaleEnd - scaleStart) * 0.5}':x='iw/zoom/4*(1-on/${d})':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`,
-      ].join(",");
+      return `${scaleFilter},zoompan=z='1.04':x='iw/zoom*0.15*(1-on/${d})':y='ih/2-(ih/zoom/2)':d=${d}:s=${w}x${h}:fps=${FPS}`;
+
+    case "pan-up":
+      return `${scaleFilter},zoompan=z='1.04':x='iw/2-(iw/zoom/2)':y='on/${d}*(ih/zoom*0.12)':d=${d}:s=${w}x${h}:fps=${FPS}`;
+
+    case "pan-down":
+      return `${scaleFilter},zoompan=z='1.04':x='iw/2-(iw/zoom/2)':y='ih/zoom*0.12*(1-on/${d})':d=${d}:s=${w}x${h}:fps=${FPS}`;
   }
 }
 
-// ─── Pre-render a single clip with Ken Burns motion ──────────────────────────
-// Returns path to a temp MP4 at OUTPUT_WIDTH x OUTPUT_HEIGHT @ FPS
-async function renderClipWithKenBurns(
+// ─── Pre-render a single cut with Ken Burns + color grade ────────────────────
+async function renderCut(
   clipPath: string,
   durationSec: number,
   motionType: MotionType,
   outPath: string
 ): Promise<void> {
   const clipDuration = await ffprobe(clipPath);
-  // Loop the clip if it's shorter than needed
   const needsLoop = clipDuration < durationSec;
 
   const kenBurnsFilter = buildKenBurnsFilter(motionType, durationSec);
-  // Color grade: slight contrast boost + saturation for cinematic look
-  const gradeFilter = `eq=contrast=1.08:brightness=0.02:saturation=1.15,unsharp=3:3:0.5`;
+  // Cinematic color grade: slight contrast + saturation boost + subtle sharpening
+  const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20,unsharp=3:3:0.6`;
   const fullFilter = `${kenBurnsFilter},${gradeFilter},format=yuv420p`;
 
-  console.log(`[assembler] Ken Burns (${motionType}) on ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
+  console.log(`[assembler] cut (${motionType}) ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
 
   const baseArgs = needsLoop
     ? ["-stream_loop", "-1", "-i", clipPath]
@@ -130,6 +104,42 @@ async function renderClipWithKenBurns(
     "-an",
     "-y", outPath,
   ]);
+}
+
+// ─── Split a section into fast cuts ─────────────────────────────────────────
+// Given total audio duration for a section, returns an array of cut durations
+// that sum to audioDuration, each between CUT_MIN_SEC and CUT_MAX_SEC.
+function sliceCuts(audioDuration: number): number[] {
+  if (audioDuration <= CUT_MAX_SEC) {
+    // Short section: single cut
+    return [audioDuration];
+  }
+
+  const cuts: number[] = [];
+  let remaining = audioDuration;
+
+  while (remaining > 0) {
+    if (remaining <= CUT_MAX_SEC) {
+      // Last cut: whatever is left (min 1s to avoid degenerate tiny clips)
+      cuts.push(Math.max(remaining, 1.0));
+      break;
+    }
+
+    // Try to place a cut close to CUT_TARGET_SEC
+    // But if only one more cut would remain and it'd be too short, stretch this one
+    const wouldLeave = remaining - CUT_TARGET_SEC;
+    if (wouldLeave > 0 && wouldLeave < CUT_MIN_SEC) {
+      // Split remaining evenly into 2 cuts instead
+      const half = remaining / 2;
+      cuts.push(half, half);
+      break;
+    }
+
+    cuts.push(CUT_TARGET_SEC);
+    remaining -= CUT_TARGET_SEC;
+  }
+
+  return cuts;
 }
 
 // ─── Generate SRT file from sections + audio durations ──────────────────────
@@ -181,52 +191,7 @@ async function generateSrt(
   await fs.writeFile(srtPath, srtContent, "utf8");
 }
 
-// ─── Chain xfade transitions across all clips ────────────────────────────────
-// For long videos (>20 clips), batch in groups of 10 to avoid filter_complex limits
-async function chainXfadeTransitions(
-  clipPaths: string[],
-  clipDurations: number[],
-  outputPath: string
-): Promise<void> {
-  if (clipPaths.length === 0) throw new Error("No clips to chain");
-
-  if (clipPaths.length === 1) {
-    await fs.copyFile(clipPaths[0], outputPath);
-    return;
-  }
-
-  // For very long videos, batch xfade in groups then concat the batches
-  const BATCH_SIZE = 10;
-  if (clipPaths.length > BATCH_SIZE) {
-    const batchOutputs: string[] = [];
-    const batchDurations: number[] = [];
-    const tmpDir = path.dirname(outputPath);
-
-    for (let bStart = 0; bStart < clipPaths.length; bStart += BATCH_SIZE) {
-      const bEnd = Math.min(bStart + BATCH_SIZE, clipPaths.length);
-      const batchClips = clipPaths.slice(bStart, bEnd);
-      const batchDurs = clipDurations.slice(bStart, bEnd);
-      const batchOut = path.join(tmpDir, `xfade_batch_${bStart}.mp4`);
-
-      await xfadeBatch(batchClips, batchDurs, batchOut);
-
-      const totalDur = batchDurs.reduce((a, b) => a + b, 0) - (batchClips.length - 1) * TRANSITION_DURATION;
-      batchOutputs.push(batchOut);
-      batchDurations.push(totalDur);
-    }
-
-    // Final xfade pass across batches
-    if (batchOutputs.length === 1) {
-      await fs.copyFile(batchOutputs[0], outputPath);
-    } else {
-      await xfadeBatch(batchOutputs, batchDurations, outputPath);
-    }
-    return;
-  }
-
-  await xfadeBatch(clipPaths, clipDurations, outputPath);
-}
-
+// ─── xfade chain: batch-safe for large clip counts ──────────────────────────
 async function xfadeBatch(
   clipPaths: string[],
   clipDurations: number[],
@@ -250,11 +215,9 @@ async function xfadeBatch(
     filterGraph += `${prevLabel}[${i}:v]xfade=transition=fade:duration=${TRANSITION_DURATION}:offset=${timeOffset.toFixed(4)}${outLabel};`;
     prevLabel = outLabel;
   }
+  filterGraph = filterGraph.slice(0, -1); // trim trailing ;
 
-  // Remove trailing semicolon
-  filterGraph = filterGraph.slice(0, -1);
-
-  console.log(`[assembler] xfade chain: ${clipPaths.length} clips, filter_complex length: ${filterGraph.length}`);
+  console.log(`[assembler] xfade: ${clipPaths.length} cuts, filter length: ${filterGraph.length}`);
 
   await ffmpeg([
     ...inputs,
@@ -267,20 +230,53 @@ async function xfadeBatch(
   ]);
 }
 
+async function chainXfadeTransitions(
+  clipPaths: string[],
+  clipDurations: number[],
+  outputPath: string
+): Promise<void> {
+  if (clipPaths.length === 0) throw new Error("No cuts to chain");
+  if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
+
+  // Batch in groups of 12 to stay well under filter_complex string limits
+  const BATCH_SIZE = 12;
+  if (clipPaths.length <= BATCH_SIZE) {
+    await xfadeBatch(clipPaths, clipDurations, outputPath);
+    return;
+  }
+
+  const tmpDir = path.dirname(outputPath);
+  const batchOutputs: string[] = [];
+  const batchDurations: number[] = [];
+
+  for (let bStart = 0; bStart < clipPaths.length; bStart += BATCH_SIZE) {
+    const bEnd = Math.min(bStart + BATCH_SIZE, clipPaths.length);
+    const bClips = clipPaths.slice(bStart, bEnd);
+    const bDurs = clipDurations.slice(bStart, bEnd);
+    const bOut = path.join(tmpDir, `xbatch_${bStart}.mp4`);
+    await xfadeBatch(bClips, bDurs, bOut);
+    const batchDur = bDurs.reduce((a, b) => a + b, 0) - (bClips.length - 1) * TRANSITION_DURATION;
+    batchOutputs.push(bOut);
+    batchDurations.push(batchDur);
+  }
+
+  if (batchOutputs.length === 1) {
+    await fs.copyFile(batchOutputs[0], outputPath);
+  } else {
+    await xfadeBatch(batchOutputs, batchDurations, outputPath);
+  }
+}
+
 // ─── Merge voiceover audio tracks ────────────────────────────────────────────
 async function mergeAudio(audioPaths: string[], outputPath: string): Promise<void> {
   if (audioPaths.length === 0) {
     await ffmpeg([
       "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-      "-t", "5", "-c:a", "aac", "-b:a", "128k",
-      "-y", outputPath,
+      "-t", "5", "-c:a", "aac", "-b:a", "128k", "-y", outputPath,
     ]);
     return;
   }
-  if (audioPaths.length === 1) {
-    await fs.copyFile(audioPaths[0], outputPath);
-    return;
-  }
+  if (audioPaths.length === 1) { await fs.copyFile(audioPaths[0], outputPath); return; }
 
   const inputs: string[] = [];
   audioPaths.forEach((p) => inputs.push("-i", p));
@@ -297,7 +293,7 @@ async function mergeAudio(audioPaths: string[], outputPath: string): Promise<voi
   ]);
 }
 
-// ─── Burn captions + mix BGM into final MP4 ──────────────────────────────────
+// ─── Burn captions + mix BGM ──────────────────────────────────────────────────
 async function finalMixWithCaptions(
   videoPath: string,
   voiceoverPath: string,
@@ -307,37 +303,28 @@ async function finalMixWithCaptions(
 ): Promise<void> {
   const font = await resolveFont();
 
-  // Build subtitle/caption filter
-  // Use subtitles filter with styling for burned-in captions
   let captionFilter = "";
   if (srtPath) {
     try {
       await fs.access(srtPath);
       const srtContent = await fs.readFile(srtPath, "utf8");
       if (srtContent.trim().length > 0) {
-        // Escape the path for FFmpeg
         const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-        if (font) {
-          captionFilter = `subtitles='${escapedSrt}':force_style='FontName=DejaVu Sans Bold,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=50'`;
-        } else {
-          captionFilter = `subtitles='${escapedSrt}'`;
-        }
+        captionFilter = font
+          ? `subtitles='${escapedSrt}':force_style='FontName=DejaVu Sans Bold,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=50'`
+          : `subtitles='${escapedSrt}'`;
       }
     } catch {
-      console.warn("[assembler] SRT file not found or empty, skipping captions");
+      console.warn("[assembler] SRT not found, skipping captions");
     }
   }
 
-  const videoFilterArgs = captionFilter
-    ? ["-vf", captionFilter]
-    : ["-c:v", "copy"];
-
+  const videoFilterArgs = captionFilter ? ["-vf", captionFilter] : [];
   const videoCodecArgs = captionFilter
     ? ["-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET]
     : ["-c:v", "copy"];
 
   if (bgmPath) {
-    // Get total voiceover duration for BGM fade out timing
     const voDuration = await ffprobe(voiceoverPath);
     const fadeOutStart = Math.max(voDuration - BGM_FADE_OUT, 0);
 
@@ -346,9 +333,7 @@ async function finalMixWithCaptions(
       "-i", voiceoverPath,
       "-stream_loop", "-1", "-i", bgmPath,
       "-filter_complex", [
-        // BGM: volume + fade in/out
         `[2:a]volume=${BGM_VOLUME},afade=t=in:st=0:d=${BGM_FADE_IN},afade=t=out:st=${fadeOutStart.toFixed(2)}:d=${BGM_FADE_OUT}[bgm]`,
-        // Mix voiceover + BGM
         `[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[audio]`,
       ].join(";"),
       "-map", "0:v",
@@ -386,12 +371,23 @@ async function extractThumbnail(videoPath: string, thumbPath: string): Promise<v
   ]);
 }
 
+// ─── Black clip fallback ─────────────────────────────────────────────────────
+async function makeBlackClip(outPath: string, durationSec: number): Promise<void> {
+  await ffmpeg([
+    "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
+    "-t", String(durationSec),
+    "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+    "-an", "-y", outPath,
+  ]);
+}
+
 // ─── Step manifest ───────────────────────────────────────────────────────────
 export const RENDER_STEPS: RenderStep[] = [
-  { label: "Pre-rendering clips with Ken Burns motion",          done: false },
+  { label: "Slicing sections into fast cuts",                    done: false },
+  { label: "Pre-rendering cuts with Ken Burns motion",           done: false },
   { label: "Merging voiceover audio tracks",                     done: false },
   { label: "Generating SRT captions",                            done: false },
-  { label: "Chaining clips with xfade transitions",              done: false },
+  { label: "Chaining cuts with xfade transitions",               done: false },
   { label: "Mixing audio + burning captions",                    done: false },
   { label: "Generating thumbnail",                               done: false },
 ];
@@ -413,7 +409,8 @@ export async function assemble(
 
   const total = RENDER_STEPS.length;
 
-  // ── Build global clip pool for fallback ──────────────────────────────────
+  // ── Build global clip pool ───────────────────────────────────────────────
+  // All downloaded clips flattened into one pool for round-robin assignment
   const globalClipPool: string[] = [];
   for (const paths of footagePathsPerSection) {
     if (paths) {
@@ -423,13 +420,14 @@ export async function assemble(
     }
   }
 
-  const resolveFootage = (i: number): string[] => {
+  // Returns the best available clips for a section — own clips first, then borrows from pool
+  const getClipsForSection = (i: number): string[] => {
     const own = footagePathsPerSection[i];
     if (own && own.length > 0) return own;
     if (globalClipPool.length === 0) return [];
-    // Borrow from pool at a staggered offset so adjacent sections look different
+    // Borrow at staggered offset so adjacent sections look different
     const offset = (i * 3) % globalClipPool.length;
-    const N = Math.min(3, globalClipPool.length);
+    const N = Math.min(4, globalClipPool.length);
     const borrowed: string[] = [];
     for (let k = 0; k < N; k++) {
       borrowed.push(globalClipPool[(offset + k) % globalClipPool.length]);
@@ -438,118 +436,162 @@ export async function assemble(
     return borrowed;
   };
 
-  // ── Step 1: Pre-render each section clip with Ken Burns ──────────────────
+  // ── Step 1: Plan cuts ────────────────────────────────────────────────────
   await onProgress(0, total, RENDER_STEPS[0].label);
 
-  const renderedClips: string[] = [];
-  const renderedDurations: number[] = [];
-  const validAudio: string[] = [];
+  // cutPlan[i] = array of { clipPath, durationSec } for each cut in section i
+  type CutInfo = { clipPath: string; durationSec: number };
+  const cutPlan: CutInfo[][] = [];
+  const validAudioForSection: (string | null)[] = [];
 
-  // Track which clip paths have been used for Ken Burns to avoid identical motion
-  // on consecutive sections that share the same source file
-  let motionIndex = 0;
+  // Global cut index used to advance both the clip pool pointer and the motion cycle,
+  // ensuring no two adjacent cuts ever get the same motion type or same source clip.
+  let globalCutIdx = 0;
 
   for (let i = 0; i < sections.length; i++) {
     const section = sections[i];
     const audioPath = audioPaths[i];
-    if (!audioPath) continue;
 
-    const audioDuration = await ffprobe(audioPath);
-    const clipDuration = Math.max(audioDuration + 0.3, 1.0);
-
-    const footage = resolveFootage(i);
-
-    if (footage.length === 0) {
-      // Absolute last resort: black clip
-      const fallbackPath = path.join(tmpDir, `black_${i}.mp4`);
-      await ffmpeg([
-        "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
-        "-t", String(clipDuration),
-        "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-        "-an", "-y", fallbackPath,
-      ]);
-      renderedClips.push(fallbackPath);
-      renderedDurations.push(clipDuration);
-      validAudio.push(audioPath);
-      motionIndex++;
+    if (!audioPath) {
+      cutPlan.push([]);
+      validAudioForSection.push(null);
       continue;
     }
 
-    // Use only the first clip per section (each section has its own unique clip)
-    // Multiple clips per section are ignored — one clip per scene, Ken Burns creates motion
-    const clipPath = footage[0];
-    const motion = MOTION_CYCLE[motionIndex % MOTION_CYCLE.length];
-    const outPath = path.join(tmpDir, `kb_section_${i}.mp4`);
+    const audioDuration = await ffprobe(audioPath);
+    if (audioDuration <= 0) {
+      cutPlan.push([]);
+      validAudioForSection.push(null);
+      continue;
+    }
 
-    try {
-      await renderClipWithKenBurns(clipPath, clipDuration, motion, outPath);
-      renderedClips.push(outPath);
-      renderedDurations.push(clipDuration);
-      validAudio.push(audioPath);
-    } catch (err) {
-      console.error(`[assembler] Ken Burns failed for section ${i}, using raw clip:`, (err as Error).message);
-      // Fallback: just scale the clip without Ken Burns
-      const fallbackPath = path.join(tmpDir, `scaled_${i}.mp4`);
+    validAudioForSection.push(audioPath);
+
+    // Determine cut durations for this section
+    const cutDurations = sliceCuts(audioDuration);
+    const availableClips = getClipsForSection(i);
+
+    const sectionCuts: CutInfo[] = [];
+
+    for (let ci = 0; ci < cutDurations.length; ci++) {
+      const cutDur = cutDurations[ci];
+
+      let clipPath: string | null = null;
+
+      if (availableClips.length > 0) {
+        // Cycle through available clips for this section — each cut gets a different one
+        clipPath = availableClips[ci % availableClips.length];
+      } else if (globalClipPool.length > 0) {
+        // Last resort: borrow from the global pool at a unique offset
+        clipPath = globalClipPool[globalCutIdx % globalClipPool.length];
+      }
+
+      sectionCuts.push({ clipPath: clipPath ?? "", durationSec: cutDur });
+      globalCutIdx++;
+    }
+
+    cutPlan.push(sectionCuts);
+  }
+
+  const totalCuts = cutPlan.reduce((sum, c) => sum + c.length, 0);
+  console.log(`[assembler] ${sections.length} sections → ${totalCuts} cuts planned`);
+
+  // ── Step 2: Pre-render each cut with Ken Burns ───────────────────────────
+  await onProgress(1, total, RENDER_STEPS[1].label);
+
+  const renderedCuts: string[] = [];
+  const renderedDurations: number[] = [];
+  const audioForRenderedCuts: string[] = []; // parallel array: audio path for each section's batch of cuts
+
+  // globalMotionIdx is separate from globalCutIdx so motion cycles independently
+  // of clip assignment — avoids identical motion on back-to-back cuts even when
+  // the same source clip is reused.
+  let globalMotionIdx = 0;
+
+  for (let i = 0; i < sections.length; i++) {
+    const cuts = cutPlan[i];
+    if (cuts.length === 0) continue;
+
+    const audioPath = validAudioForSection[i];
+    if (!audioPath) continue;
+
+    for (let ci = 0; ci < cuts.length; ci++) {
+      const { clipPath, durationSec } = cuts[ci];
+      const motionType = MOTION_CYCLE[globalMotionIdx % MOTION_CYCLE.length];
+      globalMotionIdx++;
+
+      const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
+
+      if (!clipPath) {
+        // No source footage at all: black clip
+        console.warn(`[assembler] Section ${i} cut ${ci}: no clip available, using black`);
+        await makeBlackClip(outPath, durationSec);
+        renderedCuts.push(outPath);
+        renderedDurations.push(durationSec);
+        continue;
+      }
+
       try {
-        const rawDuration = await ffprobe(clipPath);
-        const loopArgs = rawDuration < clipDuration ? ["-stream_loop", "-1"] : [];
-        await ffmpeg([
-          ...loopArgs,
-          "-i", clipPath,
-          "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
-          "-t", String(clipDuration),
-          "-r", String(FPS),
-          "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
-          "-an", "-y", fallbackPath,
-        ]);
-        renderedClips.push(fallbackPath);
-        renderedDurations.push(clipDuration);
-        validAudio.push(audioPath);
-      } catch (err2) {
-        console.error(`[assembler] Fallback scale also failed for section ${i}:`, err2);
-        // Black clip as last resort
-        const blackPath = path.join(tmpDir, `black_fallback_${i}.mp4`);
-        await ffmpeg([
-          "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
-          "-t", String(clipDuration),
-          "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-          "-an", "-y", blackPath,
-        ]);
-        renderedClips.push(blackPath);
-        renderedDurations.push(clipDuration);
-        validAudio.push(audioPath);
+        await renderCut(clipPath, durationSec, motionType, outPath);
+        renderedCuts.push(outPath);
+        renderedDurations.push(durationSec);
+      } catch (err) {
+        console.error(`[assembler] Ken Burns failed for cut ${i}/${ci}:`, (err as Error).message);
+
+        // Fallback: plain scale without Ken Burns
+        const fallbackPath = path.join(tmpDir, `scaled_${i}_${ci}.mp4`);
+        try {
+          const rawDur = await ffprobe(clipPath);
+          const loopArgs = rawDur < durationSec ? ["-stream_loop", "-1"] : [];
+          await ffmpeg([
+            ...loopArgs, "-i", clipPath,
+            "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
+            "-t", String(durationSec), "-r", String(FPS),
+            "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+            "-an", "-y", fallbackPath,
+          ]);
+          renderedCuts.push(fallbackPath);
+          renderedDurations.push(durationSec);
+        } catch {
+          // Absolute last resort
+          const blackPath = path.join(tmpDir, `black_${i}_${ci}.mp4`);
+          await makeBlackClip(blackPath, durationSec);
+          renderedCuts.push(blackPath);
+          renderedDurations.push(durationSec);
+        }
       }
     }
 
-    motionIndex++;
+    // The section's audio covers all its cuts end-to-end
+    audioForRenderedCuts.push(audioPath);
   }
 
-  if (renderedClips.length === 0) {
-    throw new Error("No clips could be rendered — check that audio was generated.");
+  if (renderedCuts.length === 0) {
+    throw new Error("No cuts could be rendered — check that audio was generated.");
   }
 
-  // ── Step 2: Merge voiceover audio ────────────────────────────────────────
-  await onProgress(1, total, RENDER_STEPS[1].label);
-  const mergedAudio = path.join(tmpDir, "voiceover_merged.aac");
-  await mergeAudio(validAudio, mergedAudio);
-
-  // ── Step 3: Generate SRT captions ────────────────────────────────────────
+  // ── Step 3: Merge voiceover audio ────────────────────────────────────────
   await onProgress(2, total, RENDER_STEPS[2].label);
+  const mergedAudio = path.join(tmpDir, "voiceover_merged.aac");
+  await mergeAudio(audioForRenderedCuts, mergedAudio);
+
+  // ── Step 4: Generate SRT captions ────────────────────────────────────────
+  await onProgress(3, total, RENDER_STEPS[3].label);
   const srtPath = path.join(tmpDir, "captions.srt");
   try {
     await generateSrt(sections, audioPaths, srtPath);
-    console.log(`[assembler] SRT captions written to ${srtPath}`);
+    console.log(`[assembler] SRT written to ${srtPath}`);
   } catch (err) {
     console.warn("[assembler] SRT generation failed, captions will be skipped:", err);
   }
 
-  // ── Step 4: Chain clips with xfade transitions ───────────────────────────
-  await onProgress(3, total, RENDER_STEPS[3].label);
-  const transitionedVideo = path.join(tmpDir, "transitioned.mp4");
-  await chainXfadeTransitions(renderedClips, renderedDurations, transitionedVideo);
-
-  // ── Step 5: Final mix — audio + BGM + captions ───────────────────────────
+  // ── Step 5: Chain all cuts with xfade transitions ────────────────────────
   await onProgress(4, total, RENDER_STEPS[4].label);
+  const transitionedVideo = path.join(tmpDir, "transitioned.mp4");
+  await chainXfadeTransitions(renderedCuts, renderedDurations, transitionedVideo);
+
+  // ── Step 6: Final mix — audio + BGM + captions ───────────────────────────
+  await onProgress(5, total, RENDER_STEPS[5].label);
   const finalMp4 = path.join(outputDir, "final.mp4");
 
   let srtExists = false;
@@ -566,8 +608,8 @@ export async function assemble(
     finalMp4
   );
 
-  // ── Step 6: Thumbnail ─────────────────────────────────────────────────────
-  await onProgress(5, total, RENDER_STEPS[5].label);
+  // ── Step 7: Thumbnail ─────────────────────────────────────────────────────
+  await onProgress(6, total, RENDER_STEPS[6].label);
   const thumbPath = path.join(outputDir, "thumb.jpg");
   await extractThumbnail(finalMp4, thumbPath);
 

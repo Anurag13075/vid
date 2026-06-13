@@ -204,7 +204,7 @@ async function runPipeline(videoId: string) {
               // 1 clip per section — search is instant, 1 download fits in the cap.
               // The assembler's global pool fills any sections that fail with
               // borrowed clips at staggered offsets for visual variety.
-              const foundClips = await findMultipleFootage(section, 1, videoId, usedIds);
+              const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
 
               if (foundClips.length > 0) {
                 const downloadedPaths: string[] = [];
