@@ -14,7 +14,8 @@ const BGM_VOLUME = 0.12;
 const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
 const CRF = 23;
-const PRESET = "slow";
+const PRESET = "veryfast";
+const THREADS = 2;
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
@@ -136,7 +137,7 @@ async function renderCut(
 
   const kenBurnsFilter = buildKenBurnsFilter(motionType, durationSec);
   // Color grade applied AFTER crop/scale so it runs on 1920x1080 not the oversize frame
-  const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20,unsharp=3:3:0.6`;
+  const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20`;
   const fullFilter = `${kenBurnsFilter},${gradeFilter},format=yuv420p`;
 
   console.log(`[assembler] cut (${motionType}) ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
@@ -150,7 +151,7 @@ async function renderCut(
     "-vf", fullFilter,
     "-t", String(durationSec),
     "-r", String(FPS),
-    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
     "-an",
     "-y", outPath,
   ]);
@@ -273,7 +274,7 @@ async function xfadeBatch(
     ...inputs,
     "-filter_complex", filterGraph,
     "-map", "[vout]",
-    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
     "-r", String(FPS),
     "-an",
     "-y", outputPath,
@@ -371,7 +372,7 @@ async function finalMixWithCaptions(
 
   const videoFilterArgs = captionFilter ? ["-vf", captionFilter] : [];
   const videoCodecArgs = captionFilter
-    ? ["-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET]
+    ? ["-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET]
     : ["-c:v", "copy"];
 
   if (bgmPath) {
@@ -597,7 +598,7 @@ export async function assemble(
             ...loopArgs, "-i", clipPath,
             "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
             "-t", String(durationSec), "-r", String(FPS),
-            "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+            "-threads", String(THREADS), "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
             "-an", "-y", fallbackPath,
           ]);
           renderedCuts.push(fallbackPath);
