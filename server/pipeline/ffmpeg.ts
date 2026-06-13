@@ -1,17 +1,14 @@
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import ffmpegStatic from "ffmpeg-static";
 
-// Prefer system ffmpeg (from nix) if available; fall back to npm bundle
+// Prefer system ffmpeg (from nix/PATH) — spawnSync works in ESM, require() does not
 const FFMPEG_PATH = (() => {
-  try {
-    const { execSync } = require("child_process");
-    const which = execSync("which ffmpeg", { stdio: ["ignore", "pipe", "ignore"] })
-      .toString()
-      .trim();
-    if (which) return which;
-  } catch {}
+  const result = spawnSync("which", ["ffmpeg"], { encoding: "utf8" });
+  if (result.status === 0 && result.stdout?.trim()) return result.stdout.trim();
   return (ffmpegStatic as string | null) || "ffmpeg";
 })();
+
+console.log(`[ffmpeg] using binary: ${FFMPEG_PATH}`);
 
 // 10 minutes — enough for any single ffmpeg operation in the pipeline
 const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;

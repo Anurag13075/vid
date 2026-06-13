@@ -240,9 +240,9 @@ async function concatSectionsWithTransitions(
     return;
   }
 
-  // For many sections (>15), use simple concat demuxer to avoid FFmpeg
-  // filter-graph complexity limits and speed up the concat step
-  if (clipPaths.length > 15) {
+  // For >5 sections, use simple concat demuxer — xfade chains with many inputs
+  // crash or SIGKILL the static ffmpeg binary due to filtergraph complexity
+  if (clipPaths.length > 5) {
     const listFile = outputPath + ".list.txt";
     const listContent = clipPaths.map((p) => `file '${p}'`).join("\n");
     await fs.writeFile(listFile, listContent);
@@ -264,25 +264,12 @@ async function concatSectionsWithTransitions(
   let prevLabel = "[0:v]";
   let timeOffset = 0;
 
-  // Precompute cumulative durations to validate offsets
-  const cumulative: number[] = [];
-  for (let i = 0; i < clipDurations.length; i++) {
-    cumulative[i] = i === 0 ? clipDurations[0] : cumulative[i - 1] + clipDurations[i];
-  }
-
   for (let i = 1; i < clipPaths.length; i++) {
     const outLabel = i === clipPaths.length - 1 ? "[vout]" : `[v${i}]`;
+    // Clamp: offset must be strictly positive or xfade errors
     timeOffset += Math.max(clipDurations[i - 1] - TRANS_DUR, 0.01);
-
-    // Ensure offset is within the previous cumulative duration to avoid xfade errors
-    const prevCum = cumulative[i - 1] || 0;
-    let offset = timeOffset;
-    const maxAllowed = Math.max(0, prevCum - TRANS_DUR * 0.5);
-    if (!isFinite(offset) || offset < 0) offset = 0;
-    if (offset > maxAllowed) offset = maxAllowed;
-
     const transition = pickTransition(i - 1);
-    filterGraph += `${prevLabel}[${i}:v]xfade=transition=${transition}:duration=${TRANS_DUR}:offset=${offset.toFixed(3)}${outLabel};`;
+    filterGraph += `${prevLabel}[${i}:v]xfade=transition=${transition}:duration=${TRANS_DUR}:offset=${timeOffset.toFixed(3)}${outLabel};`;
     prevLabel = outLabel;
   }
 
@@ -302,30 +289,32 @@ async function finalMix(
   bgmPath: string | null,
   outputPath: string
 ): Promise<void> {
-  const hasBgm = bgmPath !== null;
-  const inputs = ["-i", videoPath, "-i", voiceoverPath];
-  if (hasBgm) inputs.push("-i", bgmPath!);
-
-  if (hasBgm) {
+  // NOTE: never use `apad` in filter_complex — it creates an infinite stream
+  // that hangs or kills ffmpeg. Use `-shortest` to trim to the shorter stream.
+  if (bgmPath) {
     await ffmpeg([
-      ...inputs,
+      "-i", videoPath,
+      "-i", voiceoverPath,
+      "-i", bgmPath,
       "-filter_complex",
-      "[1:a]apad[vo];[2:a]volume=0.07[bgm];[vo][bgm]amix=inputs=2:duration=first[a]",
+      "[2:a]volume=0.07[bgm];[1:a][bgm]amix=inputs=2:duration=first[a]",
       "-map", "0:v",
       "-map", "[a]",
       "-c:v", "copy",
       "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+      "-shortest",
       "-movflags", "+faststart",
       "-y", outputPath,
     ]);
   } else {
     await ffmpeg([
-      ...inputs,
-      "-filter_complex", "[1:a]apad[a]",
+      "-i", videoPath,
+      "-i", voiceoverPath,
       "-map", "0:v",
-      "-map", "[a]",
+      "-map", "1:a",
       "-c:v", "copy",
       "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+      "-shortest",
       "-movflags", "+faststart",
       "-y", outputPath,
     ]);
