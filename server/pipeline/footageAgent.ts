@@ -3,11 +3,14 @@ import path from "path";
 import type { ScriptSection, Clip } from "./types.js";
 
 // ─── How many unique clips to fetch per section ──────────────────────────────
-// A 9-minute video with 16 sections × 3 cuts each = ~48 cuts total.
-// At 4 clips per section × 16 sections = 64 clips downloaded — 16 spare.
-// Pexels returns up to 80 results per search, Pixabay up to 200, so we
-// will never exhaust the pool even with strict uniqueness enforcement.
-const CLIPS_PER_SECTION = 4;
+// A 9-minute video with 16 sections × ~5 cuts each = ~81 cuts total.
+// At 6 clips per section × 16 sections = 96 clips downloaded — 15 spare.
+// Previously 4 clips/section gave only 64 clips vs 81 cuts, causing the
+// assembler to exhaust the pool and pin all remaining cuts to the oldest clip.
+// 6 clips/section keeps the pool above the cut count for typical video lengths.
+// Pexels returns up to 80 results per search (we request 40), Pixabay up to
+// 200, so we will never exhaust the API response even with higher per-section counts.
+const CLIPS_PER_SECTION = 6;
 
 // ─── createClipTracker ───────────────────────────────────────────────────────
 // Call this ONCE per video render and pass the same Set to every
@@ -64,8 +67,11 @@ async function searchPexels(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12_000);
 
+    // per_page raised from 20 → 40 so we have a deeper pool of unique results
+    // per keyword. With CLIPS_PER_SECTION=6 and multiple sections sharing
+    // keywords, a shallow 20-result page meant we'd exhaust unique IDs quickly.
     const response = await fetch(
-      `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=20&orientation=landscape&min_duration=4&max_duration=15`,
+      `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=40&orientation=landscape&min_duration=4&max_duration=15`,
       {
         headers: { Authorization: process.env.PEXELS_API_KEY || "" },
         signal: controller.signal,
@@ -135,8 +141,9 @@ async function searchPixabay(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12_000);
 
+    // per_page raised from 20 → 40 to match the Pexels change above.
     const response = await fetch(
-      `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=20&video_type=film&orientation=horizontal&min_duration=4&max_duration=15`,
+      `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=40&video_type=film&orientation=horizontal&min_duration=4&max_duration=15`,
       { signal: controller.signal }
     );
     clearTimeout(timer);
