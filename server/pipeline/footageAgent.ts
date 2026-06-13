@@ -1,6 +1,8 @@
 import { promises as fs } from "fs";
+import { createWriteStream } from "fs";
 import path from "path";
-import type { ScriptSection, RenderStep } from "./types.js";
+import { pipeline } from "stream/promises";
+import type { ScriptSection, RenderStep, Clip } from "./types.js";
 import { ffmpeg, ffprobe } from "./ffmpeg.js";
 
 export function createClipTracker(): Set<string> {
@@ -414,7 +416,7 @@ export async function findMultipleFootage(
     // Example: search Pexels API
     const response = await fetch(
       `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=${limit}`,
-      { headers: { Authorization: Bun.env.PEXELS_API_KEY! } }
+      { headers: { Authorization: String(process.env.PEXELS_API_KEY || "") } }
     );
     const data = await response.json() as any;
     
@@ -449,13 +451,20 @@ export async function downloadClip(
   // Download clip.videoUrl to /tmp/vidrush/{videoId}/{suffix}.mp4
   // Return local path
   const tmpDir = `/tmp/vidrush/${videoId}`;
-  await Bun.file(tmpDir).mkdir({ recursive: true });
-  
+  await fs.mkdir(tmpDir, { recursive: true });
+
   const outPath = `${tmpDir}/${suffix}.mp4`;
-  const response = await fetch(clip.videoUrl);
-  
+  const url = clip.videoUrl;
+  if (!url) throw new Error("Clip has no videoUrl");
+
+  const response = await fetch(url);
+
   if (!response.ok) throw new Error(`Download failed: ${response.statusText}`);
-  
-  await Bun.write(outPath, response);
+
+  // Stream response body to file (Node-friendly)
+  const body = response.body;
+  if (!body) throw new Error("No response body for clip download");
+  const dest = createWriteStream(outPath);
+  await pipeline(body, dest);
   return outPath;
 }
