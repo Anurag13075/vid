@@ -32,13 +32,7 @@ const FALLBACK_KEYWORDS = [
 //   - The assembler upscales everything to 1280×720 anyway
 //   - A 10s SD clip is ~200KB–1MB vs 10–40MB for HD
 //   - Even at 1 Mbps, 1 MB downloads in 8 seconds — well within our 20s cap
-function pickBestPexelsFile(videoFiles: any[]): string {
-  const valid = (videoFiles || []).filter((f: any) => f?.link && f?.width);
-  if (valid.length === 0) return "";
-  // Prefer width closest to 640 (360p/480p SD) — small file, fast download
-  valid.sort((a: any, b: any) => Math.abs(a.width - 640) - Math.abs(b.width - 640));
-  return valid[0].link;
-}
+
 
 // ─── Search Pexels for footage clips ────────────────────────────────────────
 export async function findMultipleFootage(
