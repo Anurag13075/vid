@@ -8,6 +8,7 @@ const FFMPEG_PATH = (() => {
   return (ffmpegStatic as string | null) || "ffmpeg";
 })();
 
+export { FFMPEG_PATH };
 console.log(`[ffmpeg] using binary: ${FFMPEG_PATH}`);
 
 // 10 minutes — enough for any single ffmpeg operation in the pipeline

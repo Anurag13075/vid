@@ -56,6 +56,17 @@ async function runPipeline(videoId: string) {
 
   const { title, voice, length } = video;
 
+  // Clean up any leftover temp dirs from previous runs to keep /tmp lean
+  const vidrushTmp = path.join("/tmp/vidrush");
+  try {
+    const existing = await fs.readdir(vidrushTmp).catch(() => []);
+    for (const dir of existing) {
+      if (dir !== videoId) {
+        fs.rm(path.join(vidrushTmp, dir), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  } catch {}
+
   try {
     // ── Phase 1: Script generation ──────────────────────────────────────
     await emit(videoId, {
@@ -148,8 +159,8 @@ async function runPipeline(videoId: string) {
     // Pre-initialize results array
     const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
 
-    // Hard cap per section: search + download 3 clips at ~25s each = up to 90s
-    const SECTION_HARD_CAP_MS = 90_000;
+    // Hard cap per section: search (~10s) + 1 SD download (~20s max) = ~30s
+    const SECTION_HARD_CAP_MS = 35_000;
 
     // Process in parallel batches of 2 to limit concurrent network pressure
     const BATCH_SIZE = 2;
@@ -190,25 +201,24 @@ async function runPipeline(videoId: string) {
           // slow/hanging section from stalling the whole pipeline
           const sectionWork = async () => {
             try {
-              const foundClips = await findMultipleFootage(section, 5, videoId, usedIds);
+              // 1 clip per section — search is instant, 1 download fits in the cap.
+              // The assembler's global pool fills any sections that fail with
+              // borrowed clips at staggered offsets for visual variety.
+              const foundClips = await findMultipleFootage(section, 1, videoId, usedIds);
 
               if (foundClips.length > 0) {
-                // Download clips with individual timeouts (20s each in footageAgent)
-                const downloadResults = await Promise.allSettled(
-                  foundClips.map((clip, ci) =>
-                    downloadClip(clip, videoId, `${section.id}_${ci}`)
-                  )
-                );
-                const downloadedPaths = downloadResults
-                  .filter((r): r is PromiseFulfilledResult<string> => r.status === "fulfilled")
-                  .map((r) => r.value);
+                const downloadedPaths: string[] = [];
+                for (let ci = 0; ci < foundClips.length; ci++) {
+                  try {
+                    const p = await downloadClip(foundClips[ci], videoId, `${section.id}_${ci}`);
+                    downloadedPaths.push(p);
+                  } catch (dlErr) {
+                    console.warn(`Section ${section.id} clip ${ci} download failed:`, (dlErr as Error).message);
+                  }
+                }
 
                 if (downloadedPaths.length > 0) {
-                  clips[i] = {
-                    ...foundClips[0],
-                    localPath: downloadedPaths[0],
-                    status: "ready",
-                  };
+                  clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
                   footagePathsPerSection[i] = downloadedPaths;
                 } else {
                   clips[i] = { ...clips[i], status: "failed" };
@@ -225,16 +235,23 @@ async function runPipeline(videoId: string) {
             }
           };
 
-          const hardTimeout = new Promise<void>((resolve) =>
-            setTimeout(() => {
+          // IMPORTANT: clearTimeout is required. Without it, the callback fires 35s
+          // later even after sectionWork() already succeeded, overwriting the good
+          // clips/footagePaths with null — making all sections appear to have failed.
+          let hardTimeoutId: ReturnType<typeof setTimeout>;
+          const hardTimeout = new Promise<void>((resolve) => {
+            hardTimeoutId = setTimeout(() => {
               console.warn(`Section ${section.id} timed out after ${SECTION_HARD_CAP_MS}ms — skipping`);
               clips[i] = { ...clips[i], status: "failed" };
               footagePathsPerSection[i] = null;
               resolve();
-            }, SECTION_HARD_CAP_MS)
-          );
+            }, SECTION_HARD_CAP_MS);
+          });
 
-          await Promise.race([sectionWork(), hardTimeout]);
+          await Promise.race([
+            sectionWork().then(() => clearTimeout(hardTimeoutId!)),
+            hardTimeout,
+          ]);
         })
       );
 
