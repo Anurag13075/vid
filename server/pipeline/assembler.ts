@@ -242,15 +242,50 @@ async function generateSrt(
   await fs.writeFile(srtPath, srtContent, "utf8");
 }
 
-// ─── xfade chain: batch-safe for large clip counts ──────────────────────────
-async function xfadeBatch(
+// ─── Concat demuxer: join clips with zero memory overhead ───────────────────
+// xfade filter_complex OOMs on Railway even with 12 clips at 1080p because FFmpeg
+// must hold all decoded frames in memory simultaneously. The concat demuxer reads
+// one clip at a time — constant ~200MB regardless of clip count.
+// Tradeoff: hard cuts instead of crossfades between every cut. We keep crossfades
+// only at section boundaries by pre-merging per-section clips with a tiny xfade
+// batch (≤4 clips each), then concat the section videos.
+async function concatClips(
+  clipPaths: string[],
+  outputPath: string
+): Promise<void> {
+  if (clipPaths.length === 0) throw new Error("No cuts to concat");
+  if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
+
+  // Write a concat list file
+  const listPath = outputPath + ".concat.txt";
+  const listContent = clipPaths.map((p) => `file '${p}'`).join("\n");
+  await fs.writeFile(listPath, listContent, "utf8");
+
+  console.log(`[assembler] concat demuxer: ${clipPaths.length} clips → ${path.basename(outputPath)}`);
+
+  await ffmpeg([
+    "-f", "concat",
+    "-safe", "0",
+    "-i", listPath,
+    "-c", "copy",   // stream copy — no re-encode, near-instant
+    "-y", outputPath,
+  ]);
+
+  // Clean up list file
+  await fs.unlink(listPath).catch(() => {});
+}
+
+// ─── xfade a small batch (≤4 clips) for section-boundary transitions ─────────
+async function xfadeSmallBatch(
   clipPaths: string[],
   clipDurations: number[],
   outputPath: string
 ): Promise<void> {
-  if (clipPaths.length === 1) {
-    await fs.copyFile(clipPaths[0], outputPath);
-    return;
+  if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
+
+  // Safety: never try to xfade more than 4 at once
+  if (clipPaths.length > 4) {
+    return concatClips(clipPaths, outputPath);
   }
 
   const inputs: string[] = [];
@@ -266,9 +301,7 @@ async function xfadeBatch(
     filterGraph += `${prevLabel}[${i}:v]xfade=transition=fade:duration=${TRANSITION_DURATION}:offset=${timeOffset.toFixed(4)}${outLabel};`;
     prevLabel = outLabel;
   }
-  filterGraph = filterGraph.slice(0, -1); // trim trailing ;
-
-  console.log(`[assembler] xfade: ${clipPaths.length} cuts, filter length: ${filterGraph.length}`);
+  filterGraph = filterGraph.slice(0, -1);
 
   await ffmpeg([
     ...inputs,
@@ -284,38 +317,70 @@ async function xfadeBatch(
 async function chainXfadeTransitions(
   clipPaths: string[],
   clipDurations: number[],
-  outputPath: string
+  outputPath: string,
+  // sectionBoundaries: indices in clipPaths where a new section starts
+  // used to place xfade transitions at section joins, hard cuts within sections
+  sectionBoundaries: number[]
 ): Promise<void> {
   if (clipPaths.length === 0) throw new Error("No cuts to chain");
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
 
-  // Batch in groups of 12 to stay well under filter_complex string limits
-  const BATCH_SIZE = 12;
-  if (clipPaths.length <= BATCH_SIZE) {
-    await xfadeBatch(clipPaths, clipDurations, outputPath);
+  const tmpDir = path.dirname(outputPath);
+
+  // Split clip list into sections using boundary indices
+  // Each section gets its cuts concat'd (hard cuts within section = fast)
+  // Then section videos get xfade'd together (smooth transitions at section joins)
+  const boundaries = [0, ...sectionBoundaries, clipPaths.length];
+  const sectionVideos: string[] = [];
+  const sectionDurations: number[] = [];
+
+  for (let s = 0; s < boundaries.length - 1; s++) {
+    const start = boundaries[s];
+    const end = boundaries[s + 1];
+    const sClips = clipPaths.slice(start, end);
+    const sDurs = clipDurations.slice(start, end);
+
+    if (sClips.length === 0) continue;
+
+    const sectionOut = path.join(tmpDir, `section_joined_${s}.mp4`);
+    await concatClips(sClips, sectionOut);
+    sectionVideos.push(sectionOut);
+    sectionDurations.push(sDurs.reduce((a, b) => a + b, 0));
+  }
+
+  if (sectionVideos.length === 1) {
+    await fs.copyFile(sectionVideos[0], outputPath);
     return;
   }
 
-  const tmpDir = path.dirname(outputPath);
-  const batchOutputs: string[] = [];
-  const batchDurations: number[] = [];
+  // Now xfade between section videos in batches of 4
+  const XFADE_BATCH = 4;
+  let currentVideos = sectionVideos;
+  let currentDurations = sectionDurations;
+  let pass = 0;
 
-  for (let bStart = 0; bStart < clipPaths.length; bStart += BATCH_SIZE) {
-    const bEnd = Math.min(bStart + BATCH_SIZE, clipPaths.length);
-    const bClips = clipPaths.slice(bStart, bEnd);
-    const bDurs = clipDurations.slice(bStart, bEnd);
-    const bOut = path.join(tmpDir, `xbatch_${bStart}.mp4`);
-    await xfadeBatch(bClips, bDurs, bOut);
-    const batchDur = bDurs.reduce((a, b) => a + b, 0) - (bClips.length - 1) * TRANSITION_DURATION;
-    batchOutputs.push(bOut);
-    batchDurations.push(batchDur);
+  while (currentVideos.length > 1) {
+    const nextVideos: string[] = [];
+    const nextDurations: number[] = [];
+
+    for (let b = 0; b < currentVideos.length; b += XFADE_BATCH) {
+      const bClips = currentVideos.slice(b, b + XFADE_BATCH);
+      const bDurs = currentDurations.slice(b, b + XFADE_BATCH);
+      const bOut = path.join(tmpDir, `xfade_pass${pass}_b${b}.mp4`);
+
+      await xfadeSmallBatch(bClips, bDurs, bOut);
+
+      const bDur = bDurs.reduce((a, d) => a + d, 0) - (bClips.length - 1) * TRANSITION_DURATION;
+      nextVideos.push(bOut);
+      nextDurations.push(bDur);
+    }
+
+    currentVideos = nextVideos;
+    currentDurations = nextDurations;
+    pass++;
   }
 
-  if (batchOutputs.length === 1) {
-    await fs.copyFile(batchOutputs[0], outputPath);
-  } else {
-    await xfadeBatch(batchOutputs, batchDurations, outputPath);
-  }
+  await fs.copyFile(currentVideos[0], outputPath);
 }
 
 // ─── Merge voiceover audio tracks ────────────────────────────────────────────
@@ -552,7 +617,10 @@ export async function assemble(
 
   const renderedCuts: string[] = [];
   const renderedDurations: number[] = [];
-  const audioForRenderedCuts: string[] = []; // parallel array: audio path for each section's batch of cuts
+  const audioForRenderedCuts: string[] = [];
+  // Track where each new section starts in renderedCuts — used by chainXfadeTransitions
+  // to place xfade transitions at section joins and hard cuts within sections
+  const sectionBoundaries: number[] = [];
 
   // globalMotionIdx is separate from globalCutIdx so motion cycles independently
   // of clip assignment — avoids identical motion on back-to-back cuts even when
@@ -565,6 +633,9 @@ export async function assemble(
 
     const audioPath = validAudioForSection[i];
     if (!audioPath) continue;
+
+    // Mark where this section starts in the global renderedCuts array
+    if (renderedCuts.length > 0) sectionBoundaries.push(renderedCuts.length);
 
     for (let ci = 0; ci < cuts.length; ci++) {
       const { clipPath, durationSec } = cuts[ci];
@@ -639,7 +710,8 @@ export async function assemble(
   // ── Step 5: Chain all cuts with xfade transitions ────────────────────────
   await onProgress(4, total, RENDER_STEPS[4].label);
   const transitionedVideo = path.join(tmpDir, "transitioned.mp4");
-  await chainXfadeTransitions(renderedCuts, renderedDurations, transitionedVideo);
+  console.log(`[assembler] ${renderedCuts.length} cuts, ${sectionBoundaries.length} section boundaries`);
+  await chainXfadeTransitions(renderedCuts, renderedDurations, transitionedVideo, sectionBoundaries);
 
   // ── Step 6: Final mix — audio + BGM + captions ───────────────────────────
   await onProgress(5, total, RENDER_STEPS[5].label);
