@@ -8,6 +8,11 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 // "short"  →  5-6 min  →  ~700  words across 10 sections
 // "medium" →  8-10 min →  ~1150 words across 16 sections  ← default
 // "long"   →  12-15min →  ~1700 words across 22 sections
+//
+// Groq free tier hard limit: 12,000 TPM.
+// max_tokens must stay at 8000 to keep total request under 12k.
+// We compensate by tightening the prompt (fewer tokens in = more budget for output)
+// and targeting 72-92 words/section which Groq can reliably fit in 8000 tokens.
 function targetSections(length: string): {
   count: number;
   label: string;
@@ -16,45 +21,33 @@ function targetSections(length: string): {
 } {
   switch (length) {
     case "short":
-      return { count: 10, label: "5-6 minutes",  wordsPerSection: 70,  totalWords: 700  };
+      return { count: 10, label: "5-6 minutes",   wordsPerSection: 70, totalWords: 700  };
     case "long":
       return { count: 22, label: "12-15 minutes", wordsPerSection: 78, totalWords: 1700 };
     default:
-      // medium — sweet spot for YouTube ad revenue
-      return { count: 16, label: "8-10 minutes", wordsPerSection: 72, totalWords: 1150 };
+      return { count: 16, label: "8-10 minutes",  wordsPerSection: 72, totalWords: 1150 };
   }
 }
 
 const SYSTEM_PROMPT = `You are a professional YouTube documentary scriptwriter.
-Output ONLY a single raw JSON object — no markdown, no code fences, no explanation, no extra text before or after.
-The JSON must be 100% valid. Every property must be separated by a comma. No trailing commas. No duplicate keys.`;
+Output ONLY a single raw JSON object — no markdown, no code fences, no explanation.
+The JSON must be 100% valid. Every property separated by a comma. No trailing commas. No duplicate keys.`;
 
 // ─── Robust JSON repair ───────────────────────────────────────────────────────
 function repairJson(raw: string): string {
   let s = raw.trim();
-
   s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
-  if (first !== -1 && last !== -1 && last > first) {
-    s = s.slice(first, last + 1);
-  }
-
+  if (first !== -1 && last !== -1 && last > first) s = s.slice(first, last + 1);
   s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
   s = s.replace(/\/\/[^\n]*/g, "");
-
   const missingCommaRe =
     /(\btrue|\bfalse|\bnull|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|"(?:[^"\\]|\\.)*")\s*\n(\s*"[^"]*"\s*:)/g;
   let prev = "";
-  while (prev !== s) {
-    prev = s;
-    s = s.replace(missingCommaRe, "$1,\n$2");
-  }
-
+  while (prev !== s) { prev = s; s = s.replace(missingCommaRe, "$1,\n$2"); }
   s = s.replace(/,\s*([}\]])/g, "$1");
   s = s.replace(/,\s*,/g, ",");
-
   return s;
 }
 
@@ -62,9 +55,7 @@ function repairJson(raw: string): string {
 function normaliseScript(parsed: any): Script {
   if (!parsed || typeof parsed !== "object") throw new Error("Script is not an object");
   if (!Array.isArray(parsed.sections)) throw new Error("Script missing sections array");
-  if (parsed.sections.length < 6) {
-    throw new Error(`Script has too few sections: ${parsed.sections.length}`);
-  }
+  if (parsed.sections.length < 6) throw new Error(`Script has too few sections: ${parsed.sections.length}`);
 
   const seen = new Set<number>();
   const cleaned: ScriptSection[] = [];
@@ -72,13 +63,10 @@ function normaliseScript(parsed: any): Script {
   for (let i = 0; i < parsed.sections.length; i++) {
     const s = parsed.sections[i];
     if (!s || typeof s !== "object") continue;
-
     const id = typeof s.id === "number" ? s.id : i + 1;
     if (seen.has(id)) continue;
     seen.add(id);
-
     const isGraphic = s.section_type === "graphic";
-
     cleaned.push({
       id,
       narration: isGraphic ? "" : String(s.narration || "").trim(),
@@ -111,46 +99,41 @@ function normaliseScript(parsed: any): Script {
 export async function generateScript(title: string, length: string): Promise<Script> {
   const { count, label, wordsPerSection, totalWords } = targetSections(length);
 
-  const prompt = `Write a complete documentary-style YouTube script for: "${title}"
+  // Prompt kept intentionally compact to stay under Groq's 12k TPM limit.
+  // Total request = prompt tokens (~800) + max_tokens (8000) = ~8800, well under 12k.
+  const prompt = `Write a ${label} YouTube documentary script for: "${title}"
 
-TARGET: exactly ${count} sections → real video duration of ${label}
-TOTAL NARRATION: approximately ${totalWords} words across all sections
-WORDS PER SECTION: each non-graphic section must be ${wordsPerSection}-${wordsPerSection + 20} words of narration
+REQUIREMENTS:
+- Exactly ${count} sections, ~${totalWords} total narration words
+- Each non-graphic section: ${wordsPerSection}-${wordsPerSection + 20} words of narration (count carefully)
+- Hook viewer hard in section 1 with a shocking fact or question
+- Include real stats, dates, specific details — no vague filler
+- End with strong call to action
 
-Return this exact JSON structure. IT MUST BE VALID JSON — every property separated by commas, no trailing commas, no duplicate keys:
-
+JSON format (valid JSON only, no markdown):
 {
   "title": "string",
-  "description": "string (150-200 chars, YouTube SEO)",
-  "mood": "dramatic | uplifting | neutral | tense",
-  "thumbnail_hook": "string (4-7 punchy words)",
+  "description": "string (150-200 chars SEO)",
+  "mood": "dramatic|uplifting|neutral|tense",
+  "thumbnail_hook": "4-7 punchy words",
   "sections": [
     {
       "id": 1,
-      "narration": "string (spoken narration, ${wordsPerSection}-${wordsPerSection + 20} words for non-graphic sections, empty string for graphic)",
+      "narration": "${wordsPerSection}-${wordsPerSection + 20} words or empty string for graphic",
       "visual_keywords": ["specific visual 1", "specific visual 2", "specific visual 3"],
-      "section_type": "intro | broll | stat | graphic | outro",
-      "key_point": "string or null",
+      "section_type": "intro|broll|stat|graphic|outro",
+      "key_point": "max 8 words or null",
       "estimated_words": ${wordsPerSection},
       "sfx": false
     }
   ]
 }
 
-STRICT RULES:
-1. section_type "intro" → first section only
-2. section_type "outro" → last section only
-3. section_type "graphic" → narration MUST be empty string "", used 1-2 times at act breaks only
-4. section_type "stat" → use for any section with a specific number, percentage, or date
-5. section_type "broll" → everything else
-6. visual_keywords must be cinematic and SPECIFIC to that scene, not the general topic
-7. key_point: max 8 words, only for striking stats/facts, otherwise null
-8. Write EXACTLY ${count} sections — no more, no less
-9. All IDs must be sequential starting at 1 with NO gaps and NO duplicates
-10. narration must be ${wordsPerSection}-${wordsPerSection + 20} words for ALL non-graphic sections — count carefully
-11. DO NOT pad with filler sentences. Every sentence must add value, give a fact, tell a story, or build tension.
-12. Hook the viewer hard in section 1 — start with a shocking fact or question, not a generic intro
-13. End section ${count} with a strong call to action encouraging comments`;
+RULES:
+- intro: section 1 only. outro: last section only. graphic: empty narration, max 2 uses
+- stat: sections with numbers/percentages/dates. broll: everything else
+- IDs sequential from 1, no gaps, no duplicates
+- Exactly ${count} sections, no more no less`;
 
   let lastError: Error | null = null;
 
@@ -158,12 +141,10 @@ STRICT RULES:
     try {
       const message = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        // Raised from 8000 → 16000.
-        // A 16-section script at 72-92 words/section ≈ 1300 narration words.
-        // JSON overhead (keys, brackets, visual_keywords) adds ~40% on top.
-        // 8000 tokens was cutting off mid-script causing truncated/short videos.
-        // llama-3.3-70b-versatile supports up to 32768 output tokens on Groq.
-        max_tokens: 16000,
+        // Kept at 8000 — Groq free tier limit is 12,000 TPM.
+        // prompt tokens ~800 + 8000 output = ~8800 total, safely under 12k.
+        // Previously set to 16000 which caused 413 rate limit errors.
+        max_tokens: 8000,
         temperature: 0.7,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
@@ -172,19 +153,14 @@ STRICT RULES:
       });
 
       const raw = message.choices[0]?.message?.content || "{}";
-
       let cleaned: string;
-      try {
-        cleaned = repairJson(raw);
-      } catch {
-        cleaned = raw;
-      }
+      try { cleaned = repairJson(raw); } catch { cleaned = raw; }
 
       let parsed: any;
       try {
         parsed = JSON.parse(cleaned);
       } catch (jsonErr) {
-        console.error(`Attempt ${attempt}: JSON parse failed.\nRepaired candidate:\n${cleaned.slice(0, 800)}`);
+        console.error(`Attempt ${attempt}: JSON parse failed.\n${cleaned.slice(0, 800)}`);
         throw new Error(`JSON parse error: ${(jsonErr as Error).message}`);
       }
 
