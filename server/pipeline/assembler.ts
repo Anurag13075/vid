@@ -264,12 +264,25 @@ async function concatSectionsWithTransitions(
   let prevLabel = "[0:v]";
   let timeOffset = 0;
 
+  // Precompute cumulative durations to validate offsets
+  const cumulative: number[] = [];
+  for (let i = 0; i < clipDurations.length; i++) {
+    cumulative[i] = i === 0 ? clipDurations[0] : cumulative[i - 1] + clipDurations[i];
+  }
+
   for (let i = 1; i < clipPaths.length; i++) {
     const outLabel = i === clipPaths.length - 1 ? "[vout]" : `[v${i}]`;
-    // Clamp: offset must be strictly positive or xfade errors
     timeOffset += Math.max(clipDurations[i - 1] - TRANS_DUR, 0.01);
+
+    // Ensure offset is within the previous cumulative duration to avoid xfade errors
+    const prevCum = cumulative[i - 1] || 0;
+    let offset = timeOffset;
+    const maxAllowed = Math.max(0, prevCum - TRANS_DUR * 0.5);
+    if (!isFinite(offset) || offset < 0) offset = 0;
+    if (offset > maxAllowed) offset = maxAllowed;
+
     const transition = pickTransition(i - 1);
-    filterGraph += `${prevLabel}[${i}:v]xfade=transition=${transition}:duration=${TRANS_DUR}:offset=${timeOffset.toFixed(3)}${outLabel};`;
+    filterGraph += `${prevLabel}[${i}:v]xfade=transition=${transition}:duration=${TRANS_DUR}:offset=${offset.toFixed(3)}${outLabel};`;
     prevLabel = outLabel;
   }
 
