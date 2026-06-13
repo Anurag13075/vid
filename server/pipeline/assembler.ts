@@ -471,43 +471,59 @@ async function makeBlackClip(outPath: string, durationSec: number): Promise<void
   ]);
 }
 
-// ─── Unique clip picker ───────────────────────────────────────────────────────
-// Replaces the old modulo cycling (ci % availableClips.length) which caused
-// the same 3-4 clips to repeat every few sections on longer videos.
+// ─── Unique clip picker (round-robin / max-spacing) ──────────────────────────
 //
-// Strategy:
-//   1. Try unused clips from this section's own pool first
-//   2. If exhausted, try unused clips from the global pool
-//   3. Absolute last resort: least-recently-used from global pool
-//      (only fires if total unique clips < total cuts needed, which shouldn't
-//      happen with CLIPS_PER_SECTION=4 and 16 sections = 64 downloaded clips
-//      vs ~48 cuts needed for a 9-minute video)
+// Replaces the old "mark used, never reuse" strategy which caused the entire
+// global pool to exhaust quickly (cuts >> clips) and then pinned ALL remaining
+// cuts to globalClipPool[0] — the worst possible outcome.
+//
+// New strategy: score every candidate by how long ago it was last used.
+// The clip with the highest "age" (most cuts ago) wins. This guarantees:
+//   • clips are spaced as far apart as possible across the whole video
+//   • no single clip hogs the screen once the pool is exhausted
+//   • section-local clips are still preferred (sectionPool is scored first)
+//
+// "callCount" is a monotonic counter incremented on every pick.
+// lastUsedAt stores the callCount value at the moment each clip was chosen.
+// age = callCount - lastUsedAt  →  higher age = longer since last appearance.
 function makeUniqueClipPicker(globalClipPool: string[]) {
-  const usedClipPaths = new Set<string>();
+  const lastUsedAt = new Map<string, number>();
+  let callCount = 0;
 
   return function getUniqueClip(sectionPool: string[]): string | null {
-    // 1. unused from this section's own clips
-    const unusedOwn = sectionPool.filter((c) => !usedClipPaths.has(c));
-    if (unusedOwn.length > 0) {
-      usedClipPaths.add(unusedOwn[0]);
-      return unusedOwn[0];
+    if (globalClipPool.length === 0) return null;
+    callCount++;
+
+    // Build the candidate list: prefer section-local clips but always
+    // fall back to the global pool so we never return null when clips exist.
+    const candidates = sectionPool.length > 0 ? sectionPool : globalClipPool;
+
+    let bestPath = candidates[0];
+    let bestAge = -Infinity;
+
+    for (const p of candidates) {
+      // Clips never used yet get age = Infinity → always picked before reuse
+      const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
+      if (age > bestAge) {
+        bestAge = age;
+        bestPath = p;
+      }
     }
 
-    // 2. unused from global pool
-    const unusedGlobal = globalClipPool.filter((c) => !usedClipPaths.has(c));
-    if (unusedGlobal.length > 0) {
-      usedClipPaths.add(unusedGlobal[0]);
-      return unusedGlobal[0];
+    // If section pool was fully exhausted (all ages == 1, i.e. just used),
+    // widen to the global pool and re-score for maximum spacing.
+    if (bestAge <= 1 && sectionPool.length > 0 && globalClipPool.length > sectionPool.length) {
+      for (const p of globalClipPool) {
+        const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
+        if (age > bestAge) {
+          bestAge = age;
+          bestPath = p;
+        }
+      }
     }
 
-    // 3. last resort — reuse least-recently-added global clip
-    // (logs a warning so we know the pool was exhausted)
-    if (globalClipPool.length > 0) {
-      console.warn("[assembler] clip pool exhausted — reusing oldest global clip");
-      return globalClipPool[0];
-    }
-
-    return null;
+    lastUsedAt.set(bestPath, callCount);
+    return bestPath;
   };
 }
 
@@ -568,8 +584,8 @@ export async function assemble(
   };
 
   // Unique clip picker — created once, shared across all sections.
-  // Every call to getUniqueClip() marks the chosen clip as used so it
-  // will never be returned again for this video render.
+  // Uses round-robin / max-spacing so clips are spread as far apart as
+  // possible across the whole video, even when cuts >> unique clips.
   const getUniqueClip = makeUniqueClipPicker(globalClipPool);
 
   // ── Step 1: Plan cuts ────────────────────────────────────────────────────
@@ -604,9 +620,9 @@ export async function assemble(
     for (let ci = 0; ci < cutDurations.length; ci++) {
       const cutDur = cutDurations[ci];
 
-      // getUniqueClip() replaces the old `availableClips[ci % availableClips.length]`
-      // modulo that caused repeating clips. Each clip path can only be returned
-      // once per video render.
+      // getUniqueClip scores sectionPool first, then falls back to the global
+      // pool — choosing whichever clip appeared least recently across the
+      // entire video render to maximise visual variety.
       const clipPath = getUniqueClip(availableClips);
 
       sectionCuts.push({ clipPath: clipPath ?? "", durationSec: cutDur });
