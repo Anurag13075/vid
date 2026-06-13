@@ -3,11 +3,25 @@ import type { Script, ScriptSection } from "./types.js";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-function targetSections(length: string): { count: number; label: string } {
+// ─── Target word counts per length ──────────────────────────────────────────
+// 130 words/min is the average TTS narration pace.
+// "short"  →  5-6 min  →  ~700  words across 10 sections
+// "medium" →  8-10 min →  ~1150 words across 16 sections  ← default
+// "long"   →  12-15min →  ~1700 words across 22 sections
+function targetSections(length: string): {
+  count: number;
+  label: string;
+  wordsPerSection: number;
+  totalWords: number;
+} {
   switch (length) {
-    case "short":  return { count: 12, label: "4-6 minutes" };
-    case "long":   return { count: 22, label: "12-15 minutes" };
-    default:       return { count: 16, label: "8-10 minutes" };
+    case "short":
+      return { count: 10, label: "5-6 minutes",  wordsPerSection: 70,  totalWords: 700  };
+    case "long":
+      return { count: 22, label: "12-15 minutes", wordsPerSection: 78, totalWords: 1700 };
+    default:
+      // medium — this is the sweet spot for YouTube ad revenue
+      return { count: 16, label: "8-10 minutes", wordsPerSection: 72, totalWords: 1150 };
   }
 }
 
@@ -95,11 +109,13 @@ function normaliseScript(parsed: any): Script {
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 export async function generateScript(title: string, length: string): Promise<Script> {
-  const { count, label } = targetSections(length);
+  const { count, label, wordsPerSection, totalWords } = targetSections(length);
 
   const prompt = `Write a complete documentary-style YouTube script for: "${title}"
 
-Target: exactly ${count} sections (${label} video)
+TARGET: exactly ${count} sections → real video duration of ${label}
+TOTAL NARRATION: approximately ${totalWords} words across all sections
+WORDS PER SECTION: each non-graphic section must be ${wordsPerSection}-${wordsPerSection + 20} words of narration
 
 Return this exact JSON structure. IT MUST BE VALID JSON — every property separated by commas, no trailing commas, no duplicate keys:
 
@@ -111,11 +127,11 @@ Return this exact JSON structure. IT MUST BE VALID JSON — every property separ
   "sections": [
     {
       "id": 1,
-      "narration": "string (spoken narration, 100-160 words for non-graphic sections, empty string for graphic)",
+      "narration": "string (spoken narration, ${wordsPerSection}-${wordsPerSection + 20} words for non-graphic sections, empty string for graphic)",
       "visual_keywords": ["specific visual 1", "specific visual 2", "specific visual 3"],
       "section_type": "intro | broll | stat | graphic | outro",
       "key_point": "string or null",
-      "estimated_words": 130,
+      "estimated_words": ${wordsPerSection},
       "sfx": false
     }
   ]
@@ -131,7 +147,10 @@ STRICT RULES:
 7. key_point: max 8 words, only for striking stats/facts, otherwise null
 8. Write EXACTLY ${count} sections — no more, no less
 9. All IDs must be sequential starting at 1 with NO gaps and NO duplicates
-10. narration must be 100-160 words for all non-graphic sections`;
+10. narration must be ${wordsPerSection}-${wordsPerSection + 20} words for ALL non-graphic sections — count carefully
+11. DO NOT pad with filler sentences. Every sentence must add value, give a fact, tell a story, or build tension.
+12. Hook the viewer hard in section 1 — start with a shocking fact or question, not a generic intro
+13. End section ${count} with a strong call to action encouraging comments`;
 
   let lastError: Error | null = null;
 
@@ -139,7 +158,10 @@ STRICT RULES:
     try {
       const message = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 8000,
+        // Increased from 8000 — a 16-section script at 75 words/section needs
+        // more token budget. 12000 gives comfortable headroom without hitting
+        // Groq's rate limits on the free tier.
+        max_tokens: 12000,
         temperature: 0.7,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
