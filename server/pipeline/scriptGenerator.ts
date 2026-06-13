@@ -1,7 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Groq from "groq-sdk";
 import type { Script, ScriptSection } from "./types.js";
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 function targetSections(length: string): { count: number; label: string } {
   switch (length) {
@@ -19,26 +19,17 @@ The JSON must be 100% valid. Every property must be separated by a comma. No tra
 function repairJson(raw: string): string {
   let s = raw.trim();
 
-  // Strip markdown code fences if present
   s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 
-  // Extract the outermost {...} block
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first !== -1 && last !== -1 && last > first) {
     s = s.slice(first, last + 1);
   }
 
-  // Replace smart / curly quotes with straight quotes
   s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
-
-  // Remove single-line // comments (can appear in some model outputs)
   s = s.replace(/\/\/[^\n]*/g, "");
 
-  // Add missing commas between a JSON value and the next quoted key.
-  // Matches:  true|false|null|number|"string"   followed by whitespace+newline
-  //           then optional whitespace + "nextKey":
-  // Repeat multiple passes until stable (handles cascading missing commas)
   const missingCommaRe =
     /(\btrue|\bfalse|\bnull|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|"(?:[^"\\]|\\.)*")\s*\n(\s*"[^"]*"\s*:)/g;
   let prev = "";
@@ -47,20 +38,10 @@ function repairJson(raw: string): string {
     s = s.replace(missingCommaRe, "$1,\n$2");
   }
 
-  // Remove trailing commas before } or ]
   s = s.replace(/,\s*([}\]])/g, "$1");
-
-  // Remove duplicate commas
   s = s.replace(/,\s*,/g, ",");
 
   return s;
-}
-
-// ─── Strip duplicate keys from each object in a sections array ───────────────
-function deduplicateObjectKeys(obj: Record<string, unknown>): Record<string, unknown> {
-  // JSON.parse already picks the last occurrence of duplicate keys in V8/Bun;
-  // this function is a no-op placeholder kept for explicitness.
-  return obj;
 }
 
 // ─── Validate and normalise a parsed script ──────────────────────────────────
@@ -79,7 +60,7 @@ function normaliseScript(parsed: any): Script {
     if (!s || typeof s !== "object") continue;
 
     const id = typeof s.id === "number" ? s.id : i + 1;
-    if (seen.has(id)) continue; // drop duplicate section ids
+    if (seen.has(id)) continue;
     seen.add(id);
 
     const isGraphic = s.section_type === "graphic";
@@ -156,14 +137,17 @@ STRICT RULES:
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
+      const message = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
         max_tokens: 8000,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: prompt }],
+        temperature: 0.7,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
       });
 
-      const raw = message.content[0].type === "text" ? message.content[0].text : "{}";
+      const raw = message.choices[0]?.message?.content || "{}";
 
       let cleaned: string;
       try {
