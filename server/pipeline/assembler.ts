@@ -163,28 +163,17 @@ async function processSectionClips(
     return { outputPath, duration: totalDuration };
   }
 
-  // Concat sub-cuts with dissolve transitions
-  const TRANS = 0.2;
-  const inputs = subClipPaths.flatMap((p) => ["-i", p]);
-  let filterGraph = "";
-  let prevLabel = "[0:v]";
-  let offset = 0;
-
-  for (let i = 1; i < subClipPaths.length; i++) {
-    const outLabel = i === subClipPaths.length - 1 ? "[vout]" : `[v${i}]`;
-    // Clamp offset: must be > 0 or xfade errors
-    offset += Math.max(subClipDurations[i - 1] - TRANS, 0.01);
-    filterGraph += `${prevLabel}[${i}:v]xfade=transition=dissolve:duration=${TRANS}:offset=${offset.toFixed(3)}${outLabel};`;
-    prevLabel = outLabel;
-  }
-
+  // Use concat demuxer for ALL sub-cut assembly — xfade chains crash FFmpeg
+  // when there are many cuts (e.g. 15 cuts for a long section narration).
+  const listFile = outputPath + ".cuts.txt";
+  await fs.writeFile(listFile, subClipPaths.map((p) => `file '${p}'`).join("\n"));
   await ffmpeg([
-    ...inputs,
-    "-filter_complex", filterGraph.slice(0, -1),
-    "-map", "[vout]",
+    "-f", "concat", "-safe", "0",
+    "-i", listFile,
     "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
     "-r", "25", "-an", "-y", outputPath,
   ]);
+  await fs.unlink(listFile).catch(() => {});
 
   return { outputPath, duration: totalDuration };
 }
