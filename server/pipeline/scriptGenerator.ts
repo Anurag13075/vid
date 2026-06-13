@@ -20,7 +20,7 @@ function targetSections(length: string): {
     case "long":
       return { count: 22, label: "12-15 minutes", wordsPerSection: 78, totalWords: 1700 };
     default:
-      // medium — this is the sweet spot for YouTube ad revenue
+      // medium — sweet spot for YouTube ad revenue
       return { count: 16, label: "8-10 minutes", wordsPerSection: 72, totalWords: 1150 };
   }
 }
@@ -158,10 +158,12 @@ STRICT RULES:
     try {
       const message = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        // Increased from 8000 — a 16-section script at 75 words/section needs
-        // more token budget. 12000 gives comfortable headroom without hitting
-        // Groq's rate limits on the free tier.
-        max_tokens: 12000,
+        // Raised from 8000 → 16000.
+        // A 16-section script at 72-92 words/section ≈ 1300 narration words.
+        // JSON overhead (keys, brackets, visual_keywords) adds ~40% on top.
+        // 8000 tokens was cutting off mid-script causing truncated/short videos.
+        // llama-3.3-70b-versatile supports up to 32768 output tokens on Groq.
+        max_tokens: 16000,
         temperature: 0.7,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
