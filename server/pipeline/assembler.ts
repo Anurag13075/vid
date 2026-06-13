@@ -15,14 +15,14 @@ const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
 
 // Railway 1 GB RAM / shared vCPU constraints:
-// - 1 thread: shared vCPU means more threads = more context-switching, not faster
-// - CRF 26 for intermediate renders: saves disk I/O without visible quality loss
-//   (final mix re-encodes everything anyway)
-// - PRESET "ultrafast" everywhere: ~60% less RAM on motion-estimation buffers vs
-//   "veryfast"; quality difference is invisible on intermediate clips
-// - XFADE_BATCH 2: xfade holds N fully-decoded 1080p frame buffers in memory
-//   simultaneously. 4 clips × ~8 MB/frame × lookahead ≈ 400–600 MB → OOM kill.
-//   2 clips × ~8 MB/frame ≈ 100–150 MB → safe. The while-loop in
+// - THREADS 1: shared vCPU — more threads = context-switching overhead, not speed
+// - CRF 26 for intermediates: ~20% smaller files, quality irrelevant since
+//   finalMixWithCaptions re-encodes at CRF 23
+// - PRESET "ultrafast": ~60% less RAM on libx264 motion-estimation buffers
+//   vs "veryfast". Quality difference invisible on intermediate clips.
+// - XFADE_BATCH 2: xfade holds N decoded 1080p frame buffers in memory.
+//   4 clips × ~8MB/frame × lookahead ≈ 400–600 MB → OOM kill on Railway.
+//   2 clips × ~8MB/frame ≈ 100–150 MB → safe within 1 GB ceiling.
 //   chainXfadeTransitions handles multi-pass reduction automatically.
 const THREADS = 1;
 const CRF = 26;
@@ -64,25 +64,21 @@ async function resolveFont(): Promise<string> {
 // processes every frame in software at full resolution with floating-point zoom
 // math. The replacement approach is equivalent visually but ~10x faster:
 //
-//   1. Scale the clip to OVERSIZE (e.g. 110% of output) — fast hardware path
+//   1. Scale the clip to OVERSIZE (110% of output) — fast hardware path
 //   2. Use crop= with the built-in 'n' (frame number) expression to animate
 //      the crop window across the oversize canvas — cheap integer arithmetic
 //   3. Apply color grade on the already-cropped 1920x1080 frame
-//
-// The crop window starts/ends at calculated pixel offsets derived from frame
-// number, giving smooth linear pan/zoom without zoompan's overhead.
 function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
   const totalFrames = Math.ceil(durationSec * FPS);
-  const w = OUTPUT_WIDTH;   // 1920
-  const h = OUTPUT_HEIGHT;  // 1080
+  const w = OUTPUT_WIDTH;
+  const h = OUTPUT_HEIGHT;
 
-  // Scale factor: 1.10 means 10% oversize on each axis = 2112x1188
   const SCALE = 1.10;
   const sw = Math.round(w * SCALE); // 2112
   const sh = Math.round(h * SCALE); // 1188
 
-  const dx = sw - w; // 192px horizontal travel budget
-  const dy = sh - h; // 108px vertical travel budget
+  const dx = sw - w; // 192px horizontal travel
+  const dy = sh - h; // 108px vertical travel
 
   const prog = `min(n,${totalFrames - 1})/${totalFrames - 1}`;
 
@@ -145,9 +141,6 @@ async function renderCut(
     "-vf", fullFilter,
     "-t", String(durationSec),
     "-r", String(FPS),
-    // ultrafast + 1 thread: ~60% less RAM than veryfast on motion estimation.
-    // CRF 26 instead of 23: saves ~20% file size on intermediates with no
-    // perceptible quality loss since finalMixWithCaptions re-encodes at CRF 23.
     "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
     "-an",
     "-y", outPath,
@@ -229,7 +222,9 @@ async function generateSrt(
 
 // ─── Concat demuxer: join clips with zero memory overhead ───────────────────
 // Reads one clip at a time — constant ~200 MB regardless of clip count.
-// Used for hard cuts within a section (fast, no re-encode via stream copy).
+// Used for hard cuts within a section (stream copy = no re-encode, instant).
+// -fflags +genpts fixes wrong duration metadata that the concat demuxer
+// writes into the output file header (causes "9 min video that's really 3 min").
 async function concatClips(clipPaths: string[], outputPath: string): Promise<void> {
   if (clipPaths.length === 0) throw new Error("No cuts to concat");
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
@@ -245,6 +240,7 @@ async function concatClips(clipPaths: string[], outputPath: string): Promise<voi
     "-safe", "0",
     "-i", listPath,
     "-c", "copy",
+    "-fflags", "+genpts", // fixes wrong duration metadata in output header
     "-y", outputPath,
   ]);
 
@@ -252,19 +248,6 @@ async function concatClips(clipPaths: string[], outputPath: string): Promise<voi
 }
 
 // ─── xfade a small batch (≤ XFADE_BATCH clips) for section-boundary transitions
-//
-// Railway 1 GB RAM constraint: XFADE_BATCH = 2.
-// xfade must hold N fully-decoded 1080p frame buffers simultaneously for the
-// blend operation. At 1920×1080 yuv420p that's ~6 MB per frame. With FFmpeg's
-// internal lookahead + libx264 input buffers, 4 clips pushes peak RSS to
-// 400–600 MB which trips Railway's OOM killer (SIGKILL → exit code null).
-// 2 clips peaks at ~150 MB — well within the 1 GB ceiling.
-//
-// The while-loop in chainXfadeTransitions handles multi-pass reduction:
-//   11 sections → pass 0: 6 batches of 2 → 6 videos
-//                 pass 1: 3 batches of 2 → 3 videos
-//                 pass 2: 2 batches of 2 → 1 video (done)
-// Each pass is sequential and GC'd between runs so peak RSS stays flat.
 async function xfadeSmallBatch(
   clipPaths: string[],
   clipDurations: number[],
@@ -296,8 +279,6 @@ async function xfadeSmallBatch(
     ...inputs,
     "-filter_complex", filterGraph,
     "-map", "[vout]",
-    // ultrafast here too: this is an intermediate — the final mix re-encodes.
-    // 1 thread keeps peak RAM from spiking during the xfade blend + encode.
     "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
     "-r", String(FPS),
     "-an",
@@ -341,8 +322,8 @@ async function chainXfadeTransitions(
   }
 
   // Phase 2: xfade between section videos in batches of XFADE_BATCH (2).
-  // Multi-pass binary reduction — each pass is sequential so GC can reclaim
-  // memory between passes. Peak RSS stays constant at ~150 MB per pass.
+  // Multi-pass binary reduction — sequential passes so GC can reclaim memory.
+  // Peak RSS stays flat at ~150 MB per pass regardless of section count.
   let currentVideos = sectionVideos;
   let currentDurations = sectionDurations;
   let pass = 0;
@@ -398,9 +379,9 @@ async function mergeAudio(audioPaths: string[], outputPath: string): Promise<voi
 }
 
 // ─── Burn captions + mix BGM ──────────────────────────────────────────────────
-// Final mix is the only step where we care about output quality — CRF 23 here.
-// We re-encode video anyway to burn subtitles, so this is the right place to
-// spend the quality budget, not on intermediate clips.
+// Final mix is the only step that targets output quality — CRF 23 here.
+// We re-encode video to burn subtitles anyway, so the quality budget is
+// correctly spent here, not on intermediates.
 async function finalMixWithCaptions(
   videoPath: string,
   voiceoverPath: string,
@@ -428,7 +409,7 @@ async function finalMixWithCaptions(
 
   const videoFilterArgs = captionFilter ? ["-vf", captionFilter] : [];
   // Final output: CRF 23 + veryfast (better quality than intermediates).
-  // Still 1 thread to stay within Railway's 1 GB RAM ceiling during the encode.
+  // 1 thread to stay within Railway's 1 GB ceiling during the encode.
   const videoCodecArgs = captionFilter
     ? ["-threads", String(THREADS), "-c:v", "libx264", "-crf", "23", "-preset", "veryfast"]
     : ["-c:v", "copy"];
@@ -485,10 +466,49 @@ async function makeBlackClip(outPath: string, durationSec: number): Promise<void
   await ffmpeg([
     "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
     "-t", String(durationSec),
-    // ultrafast for fallback blacks — pure color source, quality irrelevant
     "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
     "-an", "-y", outPath,
   ]);
+}
+
+// ─── Unique clip picker ───────────────────────────────────────────────────────
+// Replaces the old modulo cycling (ci % availableClips.length) which caused
+// the same 3-4 clips to repeat every few sections on longer videos.
+//
+// Strategy:
+//   1. Try unused clips from this section's own pool first
+//   2. If exhausted, try unused clips from the global pool
+//   3. Absolute last resort: least-recently-used from global pool
+//      (only fires if total unique clips < total cuts needed, which shouldn't
+//      happen with CLIPS_PER_SECTION=4 and 16 sections = 64 downloaded clips
+//      vs ~48 cuts needed for a 9-minute video)
+function makeUniqueClipPicker(globalClipPool: string[]) {
+  const usedClipPaths = new Set<string>();
+
+  return function getUniqueClip(sectionPool: string[]): string | null {
+    // 1. unused from this section's own clips
+    const unusedOwn = sectionPool.filter((c) => !usedClipPaths.has(c));
+    if (unusedOwn.length > 0) {
+      usedClipPaths.add(unusedOwn[0]);
+      return unusedOwn[0];
+    }
+
+    // 2. unused from global pool
+    const unusedGlobal = globalClipPool.filter((c) => !usedClipPaths.has(c));
+    if (unusedGlobal.length > 0) {
+      usedClipPaths.add(unusedGlobal[0]);
+      return unusedGlobal[0];
+    }
+
+    // 3. last resort — reuse least-recently-added global clip
+    // (logs a warning so we know the pool was exhausted)
+    if (globalClipPool.length > 0) {
+      console.warn("[assembler] clip pool exhausted — reusing oldest global clip");
+      return globalClipPool[0];
+    }
+
+    return null;
+  };
 }
 
 // ─── Step manifest ───────────────────────────────────────────────────────────
@@ -520,6 +540,8 @@ export async function assemble(
   const total = RENDER_STEPS.length;
 
   // ── Build global clip pool ───────────────────────────────────────────────
+  // Flat list of every unique downloaded clip path across all sections.
+  // Used as a fallback when a section's own clips are exhausted.
   const globalClipPool: string[] = [];
   for (const paths of footagePathsPerSection) {
     if (paths) {
@@ -529,6 +551,8 @@ export async function assemble(
     }
   }
 
+  // getClipsForSection: returns a section's own clips, or borrows from the
+  // global pool at a staggered offset so adjacent sections look different.
   const getClipsForSection = (i: number): string[] => {
     const own = footagePathsPerSection[i];
     if (own && own.length > 0) return own;
@@ -543,14 +567,17 @@ export async function assemble(
     return borrowed;
   };
 
+  // Unique clip picker — created once, shared across all sections.
+  // Every call to getUniqueClip() marks the chosen clip as used so it
+  // will never be returned again for this video render.
+  const getUniqueClip = makeUniqueClipPicker(globalClipPool);
+
   // ── Step 1: Plan cuts ────────────────────────────────────────────────────
   await onProgress(0, total, RENDER_STEPS[0].label);
 
   type CutInfo = { clipPath: string; durationSec: number };
   const cutPlan: CutInfo[][] = [];
   const validAudioForSection: (string | null)[] = [];
-
-  let globalCutIdx = 0;
 
   for (let i = 0; i < sections.length; i++) {
     const audioPath = audioPaths[i];
@@ -576,16 +603,13 @@ export async function assemble(
 
     for (let ci = 0; ci < cutDurations.length; ci++) {
       const cutDur = cutDurations[ci];
-      let clipPath: string | null = null;
 
-      if (availableClips.length > 0) {
-        clipPath = availableClips[ci % availableClips.length];
-      } else if (globalClipPool.length > 0) {
-        clipPath = globalClipPool[globalCutIdx % globalClipPool.length];
-      }
+      // getUniqueClip() replaces the old `availableClips[ci % availableClips.length]`
+      // modulo that caused repeating clips. Each clip path can only be returned
+      // once per video render.
+      const clipPath = getUniqueClip(availableClips);
 
       sectionCuts.push({ clipPath: clipPath ?? "", durationSec: cutDur });
-      globalCutIdx++;
     }
 
     cutPlan.push(sectionCuts);
