@@ -74,13 +74,38 @@ CRITICAL RULES:
         message.content[0].type === "text" ? message.content[0].text : "{}";
 
       // Strip markdown fences if the model wrapped the JSON
-      const cleaned = raw
+      let cleaned = raw
         .replace(/^```json\s*/i, "")
         .replace(/^```\s*/i, "")
         .replace(/\s*```$/i, "")
         .trim();
 
-      const parsed = JSON.parse(cleaned) as Script;
+      // Heuristics to recover from common model output issues
+      // 1) Extract the first {...} block if the model prepended/extraneous text
+      const firstBrace = cleaned.indexOf("{");
+      const lastBrace = cleaned.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+      }
+
+      // 2) Replace smart quotes with straight quotes
+      cleaned = cleaned.replace(/[\u2018\u2019\u201C\u201D]/g, '"');
+
+      // 3) Convert single-quoted strings to double quotes (common model quirk)
+      cleaned = cleaned.replace(/:\s*'([^']*)'/g, ': "$1"');
+      cleaned = cleaned.replace(/'([^']*)'\s*:/g, '"$1":');
+
+      // 4) Remove trailing commas before } or ]
+      cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+
+      let parsed: Script;
+      try {
+        parsed = JSON.parse(cleaned) as Script;
+      } catch (jsonErr) {
+        console.error("Failed to parse JSON script. Raw model output:\n", raw);
+        console.error("Cleaned candidate JSON:\n", cleaned);
+        throw jsonErr;
+      }
 
       if (!parsed.sections || !Array.isArray(parsed.sections)) {
         throw new Error("Script missing sections array");
