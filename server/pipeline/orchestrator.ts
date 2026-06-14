@@ -52,7 +52,7 @@ async function runPipeline(videoId: string) {
   const video = await getVideo(videoId);
   if (!video) return;
 
-  const { title, voice, length } = video;
+  const { title, voice, length, theme } = video;
 
   // Clean up leftover temp dirs from previous runs
   const vidrushTmp = path.join("/tmp/vidrush");
@@ -296,7 +296,8 @@ async function runPipeline(videoId: string) {
           renderSteps: updatedSteps,
           renderProgress: renderPct,
         });
-      }
+      },
+      theme
     );
 
     // ── Phase 5: Done ───────────────────────────────────────────────────
