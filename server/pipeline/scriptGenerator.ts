@@ -112,7 +112,7 @@ async function callCerebras(messages: { role: string; content: string }[]): Prom
         "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b",
+      model: "gpt-oss-120b",
         max_tokens: 8000,
         temperature: 0.7,
         messages,
