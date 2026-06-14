@@ -482,27 +482,28 @@ function makeUniqueClipPicker(globalClipPool: string[]) {
     if (globalClipPool.length === 0) return null;
     callCount++;
 
-    const candidates = sectionPool.length > 0 ? sectionPool : globalClipPool;
+    let bestPath = globalClipPool[0];
+    let bestScore = -Infinity;
 
-    let bestPath = candidates[0];
-    let bestAge = -Infinity;
+    // LOCAL_BONUS = 2× pool size means an unused local clip always beats
+    // an unused global clip, but a recently-used local clip (age=1,2,3...)
+    // loses to any global clip that hasn't been used in a while.
+    const LOCAL_BONUS = globalClipPool.length * 2;
 
-    for (const p of candidates) {
+    for (const p of sectionPool) {
       const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
-      if (age > bestAge) {
-        bestAge = age;
+      const score = age + LOCAL_BONUS;
+      if (score > bestScore) {
+        bestScore = score;
         bestPath = p;
       }
     }
 
-    // Widen to global pool if section pool is fully exhausted
-    if (bestAge <= 1 && sectionPool.length > 0 && globalClipPool.length > sectionPool.length) {
-      for (const p of globalClipPool) {
-        const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
-        if (age > bestAge) {
-          bestAge = age;
-          bestPath = p;
-        }
+    for (const p of globalClipPool) {
+      const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
+      if (age > bestScore) {
+        bestScore = age;
+        bestPath = p;
       }
     }
 
