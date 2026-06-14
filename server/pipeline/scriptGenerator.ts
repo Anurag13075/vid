@@ -1,16 +1,17 @@
 import type { Script, ScriptSection } from "./types.js";
 
-// No SDK import needed — Cerebras is OpenAI-compatible so we call their
-// REST API directly with native fetch (built into Node 18+).
-// This eliminates the @cerebras/cerebras_cloud_sdk package dependency entirely.
-
 const CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions";
 
 // ─── Target word counts per length ──────────────────────────────────────────
 // 130 words/min is the average TTS narration pace.
-// "short"  →  5-6 min  →  ~700  words across 10 sections
-// "medium" →  8-10 min →  ~1150 words across 16 sections  ← default
-// "long"   →  12-15min →  ~1700 words across 22 sections
+// Token budget reality with gpt-oss-120b on Cerebras free tier (100k TPM):
+//   - Each section JSON block ≈ 200-250 tokens (narration + metadata)
+//   - 12 sections × 250 tokens = ~3000 tokens output — safely under 6000 limit
+//   - Keeps 3 retry attempts within 100k TPM (3 × 6000 = 18k per video)
+//
+// "short"  →  5-6 min  →  10 sections × 65 words  = ~650  words
+// "medium" →  8-10 min →  12 sections × 80 words  = ~960  words  ← default
+// "long"   →  12-14min →  16 sections × 80 words  = ~1280 words
 function targetSections(length: string): {
   count: number;
   label: string;
@@ -19,11 +20,11 @@ function targetSections(length: string): {
 } {
   switch (length) {
     case "short":
-      return { count: 10, label: "5-6 minutes",   wordsPerSection: 70, totalWords: 700  };
+      return { count: 10, label: "5-6 minutes",   wordsPerSection: 65, totalWords: 650  };
     case "long":
-      return { count: 22, label: "12-15 minutes", wordsPerSection: 78, totalWords: 1700 };
+      return { count: 16, label: "12-14 minutes", wordsPerSection: 80, totalWords: 1280 };
     default:
-      return { count: 16, label: "8-10 minutes",  wordsPerSection: 72, totalWords: 1150 };
+      return { count: 12, label: "8-10 minutes",  wordsPerSection: 80, totalWords: 960  };
   }
 }
 
@@ -75,7 +76,7 @@ function normaliseScript(parsed: any): Script {
         ? s.section_type
         : "broll",
       key_point: s.key_point ? String(s.key_point).slice(0, 60) : null,
-      estimated_words: Number(s.estimated_words) || 120,
+      estimated_words: Number(s.estimated_words) || 80,
       sfx: Boolean(s.sfx),
     });
   }
@@ -94,15 +95,12 @@ function normaliseScript(parsed: any): Script {
 }
 
 // ─── Raw fetch call to Cerebras API ─────────────────────────────────────────
-// Cerebras is OpenAI-compatible — identical request/response shape.
-// llama-3.3-70b generates ~2000 tokens/sec so an 8000-token script
-// completes in ~4 seconds. No SDK, no package, no lockfile issues.
 async function callCerebras(messages: { role: string; content: string }[]): Promise<string> {
   const apiKey = process.env.CEREBRAS_API_KEY;
   if (!apiKey) throw new Error("CEREBRAS_API_KEY env variable is not set");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000); // 60s timeout
+  const timer = setTimeout(() => controller.abort(), 60_000);
 
   try {
     const response = await fetch(CEREBRAS_API_URL, {
@@ -112,8 +110,11 @@ async function callCerebras(messages: { role: string; content: string }[]): Prom
         "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-      model: "gpt-oss-120b",
-        max_tokens: 8000,
+        model: "gpt-oss-120b",
+        // 6000 tokens fits a 12-section script with 80 words/section comfortably.
+        // Previously 8000 caused truncated JSON on sections 14-16 AND blew
+        // the 100k TPM rate limit across 3 retry attempts (3 × 8000 = 24k).
+        max_tokens: 6000,
         temperature: 0.7,
         messages,
       }),
@@ -146,10 +147,11 @@ export async function generateScript(title: string, length: string): Promise<Scr
 
 REQUIREMENTS:
 - Exactly ${count} sections, ~${totalWords} total narration words
-- Each non-graphic section: ${wordsPerSection}-${wordsPerSection + 20} words of narration (count carefully)
+- Each non-graphic section: EXACTLY ${wordsPerSection} words of narration — count every word carefully
 - Hook viewer hard in section 1 with a shocking fact or question
 - Include real stats, dates, specific details — no vague filler
 - End with strong call to action
+- Keep narration concise — do NOT exceed ${wordsPerSection + 10} words per section
 
 JSON format (valid JSON only, no markdown):
 {
@@ -160,8 +162,8 @@ JSON format (valid JSON only, no markdown):
   "sections": [
     {
       "id": 1,
-      "narration": "${wordsPerSection}-${wordsPerSection + 20} words or empty string for graphic",
-      "visual_keywords": ["specific visual 1", "specific visual 2", "specific visual 3"],
+      "narration": "exactly ${wordsPerSection} words or empty string for graphic",
+      "visual_keywords": ["keyword1", "keyword2", "keyword3"],
       "section_type": "intro|broll|stat|graphic|outro",
       "key_point": "max 8 words or null",
       "estimated_words": ${wordsPerSection},
@@ -171,10 +173,11 @@ JSON format (valid JSON only, no markdown):
 }
 
 RULES:
-- intro: section 1 only. outro: last section only. graphic: empty narration, max 2 uses
+- intro: section 1 only. outro: last section only. graphic: empty narration, max 1 use
 - stat: sections with numbers/percentages/dates. broll: everything else
 - IDs sequential from 1, no gaps, no duplicates
-- Exactly ${count} sections, no more no less`;
+- Exactly ${count} sections, no more no less
+- Output ONLY the JSON object, nothing else`;
 
   let lastError: Error | null = null;
 
@@ -185,6 +188,8 @@ RULES:
         { role: "user",   content: prompt },
       ]);
 
+      console.log(`[cerebras] attempt ${attempt} raw length: ${raw.length} chars`);
+
       let cleaned: string;
       try { cleaned = repairJson(raw); } catch { cleaned = raw; }
 
@@ -192,7 +197,7 @@ RULES:
       try {
         parsed = JSON.parse(cleaned);
       } catch (jsonErr) {
-        console.error(`Attempt ${attempt}: JSON parse failed.\n${cleaned.slice(0, 800)}`);
+        console.error(`Attempt ${attempt}: JSON parse failed.\n${cleaned.slice(0, 500)}`);
         throw new Error(`JSON parse error: ${(jsonErr as Error).message}`);
       }
 
@@ -200,7 +205,9 @@ RULES:
     } catch (err) {
       lastError = err as Error;
       console.error(`Script generation attempt ${attempt} failed:`, (err as Error).message);
-      if (attempt < 3) await sleep(4000 * attempt);
+      // Longer delay on 429 rate limit errors to let the TPM window reset
+      const delay = (err as Error).message.includes("429") ? 15000 : 4000 * attempt;
+      if (attempt < 3) await sleep(delay);
     }
   }
 
