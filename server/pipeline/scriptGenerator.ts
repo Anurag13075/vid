@@ -10,11 +10,11 @@ function targetSections(length: string): {
 } {
   switch (length) {
     case "short":
-      return { count: 8,  label: "5-6 minutes",   wordsPerSection: 100, totalWords: 800  };
+      return { count: 8,  label: "5-6 minutes",   wordsPerSection: 60, totalWords: 480 };
     case "long":
-      return { count: 12, label: "12-14 minutes",  wordsPerSection: 130, totalWords: 1560 };
+      return { count: 12, label: "12-14 minutes",  wordsPerSection: 70, totalWords: 840 };
     default:
-      return { count: 10, label: "8-10 minutes",   wordsPerSection: 120, totalWords: 1200 };
+      return { count: 10, label: "8-10 minutes",   wordsPerSection: 65, totalWords: 650 };
   }
 }
 
