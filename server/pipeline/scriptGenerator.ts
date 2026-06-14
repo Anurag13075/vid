@@ -1,11 +1,10 @@
-import Cerebras from "@cerebras/cerebras_cloud_sdk";
 import type { Script, ScriptSection } from "./types.js";
 
-// Cerebras is OpenAI-compatible but ~10x faster than Groq at inference.
-// llama-3.3-70b runs at ~2000 tokens/sec on their Wafer-Scale Engine.
-// Rate limits on the free tier: 60 RPM, 100k TPM — generous enough for
-// our use case (one script generation per video, ~4000-8000 tokens output).
-const cerebras = new Cerebras({ apiKey: process.env.CEREBRAS_API_KEY });
+// No SDK import needed — Cerebras is OpenAI-compatible so we call their
+// REST API directly with native fetch (built into Node 18+).
+// This eliminates the @cerebras/cerebras_cloud_sdk package dependency entirely.
+
+const CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions";
 
 // ─── Target word counts per length ──────────────────────────────────────────
 // 130 words/min is the average TTS narration pace.
@@ -94,6 +93,51 @@ function normaliseScript(parsed: any): Script {
   };
 }
 
+// ─── Raw fetch call to Cerebras API ─────────────────────────────────────────
+// Cerebras is OpenAI-compatible — identical request/response shape.
+// llama-3.3-70b generates ~2000 tokens/sec so an 8000-token script
+// completes in ~4 seconds. No SDK, no package, no lockfile issues.
+async function callCerebras(messages: { role: string; content: string }[]): Promise<string> {
+  const apiKey = process.env.CEREBRAS_API_KEY;
+  if (!apiKey) throw new Error("CEREBRAS_API_KEY env variable is not set");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000); // 60s timeout
+
+  try {
+    const response = await fetch(CEREBRAS_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b",
+        max_tokens: 8000,
+        temperature: 0.7,
+        messages,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Cerebras API error ${response.status}: ${errText}`);
+    }
+
+    const data = await response.json() as any;
+    return (data.choices?.[0]?.message?.content as string) || "{}";
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (err?.name === "AbortError") {
+      throw new Error("Cerebras API request timed out after 60s");
+    }
+    throw err;
+  }
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 export async function generateScript(title: string, length: string): Promise<Script> {
   const { count, label, wordsPerSection, totalWords } = targetSections(length);
@@ -136,21 +180,11 @@ RULES:
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      // Cerebras SDK uses the same interface as OpenAI/Groq —
-      // chat.completions.create() with identical parameters.
-      // llama-3.3-70b on Cerebras generates ~2000 tokens/sec so a full
-      // 8000-token script completes in ~4 seconds vs ~30s on Groq free tier.
-      const message = await cerebras.chat.completions.create({
-        model: "llama-3.3-70b",
-        max_tokens: 8000,
-        temperature: 0.7,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user",   content: prompt },
-        ],
-      });
+      const raw = await callCerebras([
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user",   content: prompt },
+      ]);
 
-      const raw = (message.choices[0]?.message?.content as string) || "{}";
       let cleaned: string;
       try { cleaned = repairJson(raw); } catch { cleaned = raw; }
 
