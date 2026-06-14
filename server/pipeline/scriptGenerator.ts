@@ -1,18 +1,17 @@
-import Groq from "groq-sdk";
+import Cerebras from "@cerebras/cerebras_cloud_sdk";
 import type { Script, ScriptSection } from "./types.js";
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Cerebras is OpenAI-compatible but ~10x faster than Groq at inference.
+// llama-3.3-70b runs at ~2000 tokens/sec on their Wafer-Scale Engine.
+// Rate limits on the free tier: 60 RPM, 100k TPM — generous enough for
+// our use case (one script generation per video, ~4000-8000 tokens output).
+const cerebras = new Cerebras({ apiKey: process.env.CEREBRAS_API_KEY });
 
 // ─── Target word counts per length ──────────────────────────────────────────
 // 130 words/min is the average TTS narration pace.
 // "short"  →  5-6 min  →  ~700  words across 10 sections
 // "medium" →  8-10 min →  ~1150 words across 16 sections  ← default
 // "long"   →  12-15min →  ~1700 words across 22 sections
-//
-// Groq free tier hard limit: 12,000 TPM.
-// max_tokens must stay at 8000 to keep total request under 12k.
-// We compensate by tightening the prompt (fewer tokens in = more budget for output)
-// and targeting 72-92 words/section which Groq can reliably fit in 8000 tokens.
 function targetSections(length: string): {
   count: number;
   label: string;
@@ -99,8 +98,6 @@ function normaliseScript(parsed: any): Script {
 export async function generateScript(title: string, length: string): Promise<Script> {
   const { count, label, wordsPerSection, totalWords } = targetSections(length);
 
-  // Prompt kept intentionally compact to stay under Groq's 12k TPM limit.
-  // Total request = prompt tokens (~800) + max_tokens (8000) = ~8800, well under 12k.
   const prompt = `Write a ${label} YouTube documentary script for: "${title}"
 
 REQUIREMENTS:
@@ -139,20 +136,21 @@ RULES:
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const message = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        // Kept at 8000 — Groq free tier limit is 12,000 TPM.
-        // prompt tokens ~800 + 8000 output = ~8800 total, safely under 12k.
-        // Previously set to 16000 which caused 413 rate limit errors.
+      // Cerebras SDK uses the same interface as OpenAI/Groq —
+      // chat.completions.create() with identical parameters.
+      // llama-3.3-70b on Cerebras generates ~2000 tokens/sec so a full
+      // 8000-token script completes in ~4 seconds vs ~30s on Groq free tier.
+      const message = await cerebras.chat.completions.create({
+        model: "llama-3.3-70b",
         max_tokens: 8000,
         temperature: 0.7,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt },
+          { role: "user",   content: prompt },
         ],
       });
 
-      const raw = message.choices[0]?.message?.content || "{}";
+      const raw = (message.choices[0]?.message?.content as string) || "{}";
       let cleaned: string;
       try { cleaned = repairJson(raw); } catch { cleaned = raw; }
 
