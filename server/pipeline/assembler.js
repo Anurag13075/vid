@@ -1,161 +1,295 @@
-import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
-const TRANSITIONS = [
-    "fade", "fadeblack", "fadegrays",
-    "slideleft", "slideright", "slideup", "slidedown",
-    "wipeleft", "wiperight", "wipeup", "wipedown",
-    "smoothleft", "smoothright", "smoothup", "smoothdown",
-    "circlecrop", "rectcrop", "distance", "dissolve",
+import { ffmpeg, ffprobe } from "./ffmpeg.js";
+// ─── Constants ───────────────────────────────────────────────────────────────
+const OUTPUT_WIDTH = 1920;
+const OUTPUT_HEIGHT = 1080;
+// Intermediates rendered at 720p — cuts RAM ~55% during Ken Burns + xfade.
+// finalMixWithCaptions upscales back to 1080p at CRF 23 in one pass.
+const INTERMEDIATE_WIDTH = 1280;
+const INTERMEDIATE_HEIGHT = 720;
+const FPS = 30;
+const TRANSITION_DURATION = 0.25;
+const BGM_VOLUME = 0.12;
+const BGM_FADE_IN = 1.0;
+const BGM_FADE_OUT = 2.0;
+// Railway 1 GB RAM / shared vCPU constraints:
+// - THREADS 1: shared vCPU — more threads = context-switching overhead
+// - CRF 26 for intermediates: ~20% smaller, quality irrelevant (re-encoded at CRF 23 in final)
+// - PRESET "ultrafast": ~60% less RAM on libx264 motion-estimation buffers
+// - XFADE_BATCH 2: 2 clips × ~4MB/frame (720p) ≈ 60–80 MB → safe within 1 GB ceiling
+const THREADS = 1;
+const CRF = 26;
+const PRESET = "ultrafast";
+const XFADE_BATCH = 2;
+const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+const FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+// Target duration for each individual visual cut (in seconds)
+const CUT_TARGET_SEC = 3.5;
+const CUT_MIN_SEC = 2.5;
+const CUT_MAX_SEC = 5.0;
+const MOTION_CYCLE = [
+    "zoom-in",
+    "pan-right",
+    "zoom-out",
+    "pan-left",
+    "zoom-in",
+    "pan-up",
+    "zoom-out",
+    "pan-down",
 ];
-function pickTransition(idx) {
-    // Use a mix of deterministic-but-varied selection
-    const pool = [
-        TRANSITIONS[idx % TRANSITIONS.length],
-        TRANSITIONS[(idx * 3 + 7) % TRANSITIONS.length],
-        TRANSITIONS[(idx * 5 + 2) % TRANSITIONS.length],
-    ];
-    return pool[idx % pool.length];
-}
-function escapeText(s) {
-    return s
-        .replace(/\\/g, "\\\\")
-        .replace(/'/g, "") // remove apostrophes — they break ffmpeg single-quoted filter args
-        .replace(/"/g, "") // remove double quotes too
-        .replace(/:/g, "\\:")
-        .replace(/\[/g, "\\[")
-        .replace(/\]/g, "\\]")
-        .replace(/,/g, "\\,")
-        .replace(/%/g, "") // percent signs can also break filter expressions
-        .slice(0, 52);
-}
-function ffmpeg(args) {
-    return new Promise((resolve, reject) => {
-        const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
-        let stderr = "";
-        proc.stderr?.on("data", (d) => { stderr += d.toString(); });
-        proc.on("close", (code) => {
-            if (code === 0)
-                resolve();
-            else
-                reject(new Error(`FFmpeg error (${code}): ${stderr.slice(-800)}`));
-        });
-        proc.on("error", (e) => reject(new Error(`FFmpeg not found: ${e.message}`)));
-    });
-}
-async function ffprobe(filePath) {
-    return new Promise((resolve) => {
-        const proc = spawn("ffprobe", [
-            "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", filePath,
-        ]);
-        let out = "";
-        proc.stdout.on("data", (d) => { out += d.toString(); });
-        proc.on("close", () => resolve(parseFloat(out.trim()) || 5));
-        proc.on("error", () => resolve(5));
-    });
-}
-// 4 Ken Burns patterns — each returns { z, x, y } expressions valid in zoompan
-// zoompan variables: on (output frame count), zoom, iw, ih, ow, oh, x, y
-// NOTE: do NOT use 't' in zoompan x/y/z — use 'on' instead
-function kenBurnsPattern(idx) {
-    const patterns = [
-        // 0: slow zoom-in, locked center
-        { z: "min(zoom+0.0015,1.5)", x: "iw/2-(iw/zoom/2)", y: "ih/2-(ih/zoom/2)" },
-        // 1: zoom-in, pan right
-        { z: "1.25", x: "min(on*0.6,iw-(iw/zoom))", y: "ih/2-(ih/zoom/2)" },
-        // 2: zoom-in, pan left
-        { z: "1.25", x: "max(iw-(iw/zoom)-on*0.6,0)", y: "ih/2-(ih/zoom/2)" },
-        // 3: zoom-in, pan down
-        { z: "min(zoom+0.001,1.3)", x: "iw/2-(iw/zoom/2)", y: "min(on*0.4,ih-(ih/zoom))" },
-    ];
-    return patterns[idx % patterns.length];
-}
-function buildGraphicText(section) {
-    if (section.section_type === "graphic") {
-        return section.key_point ? escapeText(section.key_point) : escapeText(section.narration.slice(0, 60));
+// ─── Resolve font path ───────────────────────────────────────────────────────
+async function resolveFont() {
+    for (const f of [FONT, FONT_FALLBACK]) {
+        try {
+            await fs.access(f);
+            return f;
+        }
+        catch { }
     }
-    return section.key_point ? escapeText(section.key_point) : escapeText(section.narration.slice(0, 80));
+    return "";
 }
-async function createMotionGraphicClip(section, outputPath, clipDuration) {
-    const headline = buildGraphicText(section);
-    const detail = section.section_type === "stat"
-        ? escapeText(section.narration.slice(0, 120))
-        : "";
-    const showEnd = Math.max(clipDuration - 0.4, 1.2).toFixed(1);
-    const fadeOut = Math.max(clipDuration - 0.8, 0).toFixed(1);
-    // Build filter chain — use semicolons inside enable expressions via lte/gte instead of between()
-    // to avoid comma conflicts in the -vf chain
-    const parts = [
-        "format=yuv420p",
-        `drawbox=x=0:y=0:w=iw:h=ih:color=0x071a2b:t=fill`,
-        `drawbox=x=90:y=140:w=1740:h=10:color=0x7C3AED:t=fill`,
-        `drawtext=text='${headline}':fontsize=64:fontcolor=white:x=(w-text_w)/2:y=h*0.30`,
-    ];
-    if (detail) {
-        parts.push(`drawtext=text='${detail}':fontsize=30:fontcolor=0xCCCCCC:x=(w-text_w)/2:y=h*0.56`);
-    }
-    parts.push(`fade=t=in:st=0:d=0.6`, `fade=t=out:st=${fadeOut}:d=0.6`, `format=yuv420p`);
-    await ffmpeg([
-        "-f", "lavfi",
-        "-i", `color=c=0x071a2b:s=1920x1080:r=25`,
-        "-t", String(clipDuration),
-        "-vf", parts.join(","),
-        "-c:v", "libx264", "-crf", "22", "-preset", "ultrafast",
-        "-an", "-y", outputPath,
-    ]);
-    return clipDuration;
-}
-async function processClip(footagePath, audioPath, section, sectionIndex, outputPath, videoTitle) {
-    const audioDuration = await ffprobe(audioPath);
-    const clipDuration = Math.max(audioDuration + 0.5, 3.5);
-    if (section.section_type === "stat" || section.section_type === "graphic") {
-        return await createMotionGraphicClip(section, outputPath, clipDuration);
-    }
-    const { z: zExpr, x: xExpr, y: yExpr } = kenBurnsPattern(sectionIndex);
-    const filters = [
-        "scale=1920:1080:force_original_aspect_ratio=decrease",
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
-        `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=75:fps=25`,
-        "scale=1920:1080", // force exact 1920x1080 after zoompan — xfade requires all inputs same size
-        "format=yuv420p",
-        "eq=contrast=1.10:brightness=0.02:saturation=1.08",
-        "unsharp=5:5:0.8:3:3:0.0",
-    ];
-    if (section.section_type === "intro" && videoTitle) {
-        const tLine1 = escapeText(videoTitle.slice(0, 38));
-        const tLine2 = videoTitle.length > 38 ? escapeText(videoTitle.slice(38, 72)) : "";
-        const showEnd = Math.min(audioDuration - 0.4, 5.0).toFixed(1);
-        const en04 = `gte(t\\,0.4)*lte(t\\,${showEnd})`;
-        const en07 = `gte(t\\,0.7)*lte(t\\,${showEnd})`;
-        filters.push(`drawbox=x=0:y=ih*0.28:w=iw:h=ih*0.44:color=0x000000B8:t=fill:enable='${en04}'`, `drawbox=x=0:y=ih*0.28:w=iw:h=4:color=0x7C3AED:t=fill:enable='${en04}'`, `drawbox=x=0:y=ih*0.72:w=iw:h=4:color=0x7C3AED:t=fill:enable='${en04}'`, `drawtext=text='${tLine1}':fontsize=62:fontcolor=white:x=(w-text_w)/2:y=h*0.38:enable='${en07}'`);
-        if (tLine2) {
-            filters.push(`drawtext=text='${tLine2}':fontsize=62:fontcolor=white:x=(w-text_w)/2:y=h*0.48:enable='${en07}'`);
+// ─── Build Ken Burns filter string — scale+crop approach (no zoompan) ────────
+// Uses INTERMEDIATE dimensions (1280x720) for all intermediate renders.
+// ~10x faster than zoompan and uses ~55% less RAM than 1080p equivalents.
+function buildKenBurnsFilter(motion, durationSec) {
+    const totalFrames = Math.ceil(durationSec * FPS);
+    const w = INTERMEDIATE_WIDTH;
+    const h = INTERMEDIATE_HEIGHT;
+    const SCALE = 1.10;
+    const sw = Math.round(w * SCALE); // 1408
+    const sh = Math.round(h * SCALE); // 792
+    const dx = sw - w; // 128px horizontal travel
+    const dy = sh - h; // 72px vertical travel
+    const prog = `min(n,${totalFrames - 1})/${totalFrames - 1}`;
+    switch (motion) {
+        case "zoom-in": {
+            const cropW = `${sw}-${dx}*${prog}`;
+            const cropH = `${sh}-${dy}*${prog}`;
+            const cropX = `(${sw}-(${cropW}))/2`;
+            const cropY = `(${sh}-(${cropH}))/2`;
+            return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop='${cropW}':'${cropH}':'${cropX}':'${cropY}',scale=${w}:${h}`;
+        }
+        case "zoom-out": {
+            const cropW = `${w}+${dx}*${prog}`;
+            const cropH = `${h}+${dy}*${prog}`;
+            const cropX = `(${sw}-(${cropW}))/2`;
+            const cropY = `(${sh}-(${cropH}))/2`;
+            return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop='${cropW}':'${cropH}':'${cropX}':'${cropY}',scale=${w}:${h}`;
+        }
+        case "pan-right": {
+            const cropX = `${dx}*${prog}`;
+            return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:'${cropX}':${Math.floor(dy / 2)}`;
+        }
+        case "pan-left": {
+            const cropX = `${dx}*(1-${prog})`;
+            return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:'${cropX}':${Math.floor(dy / 2)}`;
+        }
+        case "pan-up": {
+            const cropY = `${dy}*${prog}`;
+            return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${cropY}'`;
+        }
+        case "pan-down": {
+            const cropY = `${dy}*(1-${prog})`;
+            return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${cropY}'`;
         }
     }
-    if (section.key_point) {
-        const showEnd = Math.min(audioDuration - 0.4, 5.5).toFixed(1);
-        const en10 = `gte(t\\,1.0)*lte(t\\,${showEnd})`;
-        const en13 = `gte(t\\,1.3)*lte(t\\,${showEnd})`;
-        filters.push(`drawbox=x=22:y=ih-108:w=iw-44:h=96:color=0x000000A6:t=fill:enable='${en10}'`, `drawbox=x=22:y=ih-108:w=10:h=96:color=0x7C3AED:t=fill:enable='${en10}'`, `drawtext=text='${escapeText(section.key_point)}':fontsize=38:fontcolor=white:x=42:y=h-74:enable='${en13}'`);
-    }
-    await ffmpeg([
-        "-stream_loop", "-1", "-i", footagePath,
-        "-vf", filters.join(","),
-        "-t", String(clipDuration),
-        "-r", "25",
-        "-c:v", "libx264", "-crf", "22", "-preset", "ultrafast",
-        "-an", "-y", outputPath,
-    ]);
-    return clipDuration;
 }
+// ─── Pre-render a single cut with Ken Burns + color grade ────────────────────
+async function renderCut(clipPath, durationSec, motionType, outPath) {
+    const clipDuration = await ffprobe(clipPath);
+    const needsLoop = clipDuration < durationSec;
+    const kenBurnsFilter = buildKenBurnsFilter(motionType, durationSec);
+    const gradeFilter = `eq=contrast=1.10:brightness=0.015:saturation=1.20`;
+    const fullFilter = `${kenBurnsFilter},${gradeFilter},format=yuv420p`;
+    console.log(`[assembler] cut (${motionType}) ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
+    const baseArgs = needsLoop
+        ? ["-stream_loop", "-1", "-i", clipPath]
+        : ["-i", clipPath];
+    await ffmpeg([
+        ...baseArgs,
+        "-vf", fullFilter,
+        "-t", String(durationSec),
+        "-r", String(FPS),
+        "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+        "-an",
+        "-y", outPath,
+    ]);
+}
+// ─── Split a section into fast cuts ──────────────────────────────────────────
+function sliceCuts(audioDuration) {
+    if (audioDuration <= CUT_MAX_SEC)
+        return [audioDuration];
+    const cuts = [];
+    let remaining = audioDuration;
+    while (remaining > 0) {
+        if (remaining <= CUT_MAX_SEC) {
+            cuts.push(Math.max(remaining, 1.0));
+            break;
+        }
+        const wouldLeave = remaining - CUT_TARGET_SEC;
+        if (wouldLeave > 0 && wouldLeave < CUT_MIN_SEC) {
+            const half = remaining / 2;
+            cuts.push(half, half);
+            break;
+        }
+        cuts.push(CUT_TARGET_SEC);
+        remaining -= CUT_TARGET_SEC;
+    }
+    return cuts;
+}
+// ─── Generate SRT file from sections + audio durations ───────────────────────
+function formatSrtTime(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    const ms = Math.round((seconds % 1) * 1000);
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+}
+async function generateSrt(sections, audioPaths, srtPath) {
+    let srtContent = "";
+    let index = 1;
+    let timeOffset = 0;
+    for (let i = 0; i < sections.length; i++) {
+        const section = sections[i];
+        const audioPath = audioPaths[i];
+        if (!audioPath || !section.narration.trim())
+            continue;
+        const duration = await ffprobe(audioPath);
+        if (duration <= 0)
+            continue;
+        const words = section.narration.trim().split(/\s+/);
+        const chunkSize = 8;
+        const chunks = [];
+        for (let w = 0; w < words.length; w += chunkSize) {
+            chunks.push(words.slice(w, w + chunkSize).join(" "));
+        }
+        const chunkDuration = duration / chunks.length;
+        for (let c = 0; c < chunks.length; c++) {
+            const start = timeOffset + c * chunkDuration;
+            const end = start + chunkDuration - 0.05;
+            srtContent += `${index}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${chunks[c]}\n\n`;
+            index++;
+        }
+        timeOffset += duration;
+    }
+    await fs.writeFile(srtPath, srtContent, "utf8");
+}
+// ─── Concat demuxer: join clips with zero memory overhead ────────────────────
+// Stream copy — no re-encode, constant ~200 MB RAM regardless of clip count.
+// -fflags +genpts fixes wrong duration metadata in concat output header.
+async function concatClips(clipPaths, outputPath) {
+    if (clipPaths.length === 0)
+        throw new Error("No cuts to concat");
+    if (clipPaths.length === 1) {
+        await fs.copyFile(clipPaths[0], outputPath);
+        return;
+    }
+    const listPath = outputPath + ".concat.txt";
+    const listContent = clipPaths.map((p) => `file '${p}'`).join("\n");
+    await fs.writeFile(listPath, listContent, "utf8");
+    console.log(`[assembler] concat demuxer: ${clipPaths.length} clips → ${path.basename(outputPath)}`);
+    await ffmpeg([
+        "-f", "concat",
+        "-safe", "0",
+        "-i", listPath,
+        "-c", "copy",
+        "-fflags", "+genpts",
+        "-y", outputPath,
+    ]);
+    await fs.unlink(listPath).catch(() => { });
+}
+// ─── xfade a small batch (≤ XFADE_BATCH clips) for section-boundary transitions
+async function xfadeSmallBatch(clipPaths, clipDurations, outputPath) {
+    if (clipPaths.length === 1) {
+        await fs.copyFile(clipPaths[0], outputPath);
+        return;
+    }
+    if (clipPaths.length > XFADE_BATCH) {
+        return concatClips(clipPaths, outputPath);
+    }
+    const inputs = [];
+    clipPaths.forEach((p) => inputs.push("-i", p));
+    let filterGraph = "";
+    let prevLabel = "[0:v]";
+    let timeOffset = 0;
+    for (let i = 1; i < clipPaths.length; i++) {
+        const outLabel = i === clipPaths.length - 1 ? "[vout]" : `[v${i}]`;
+        timeOffset += Math.max(clipDurations[i - 1] - TRANSITION_DURATION, 0.01);
+        filterGraph += `${prevLabel}[${i}:v]xfade=transition=fade:duration=${TRANSITION_DURATION}:offset=${timeOffset.toFixed(4)}${outLabel};`;
+        prevLabel = outLabel;
+    }
+    filterGraph = filterGraph.slice(0, -1);
+    await ffmpeg([
+        ...inputs,
+        "-filter_complex", filterGraph,
+        "-map", "[vout]",
+        "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+        "-r", String(FPS),
+        "-an",
+        "-y", outputPath,
+    ]);
+}
+// ─── Chain xfade transitions across all section videos ───────────────────────
+// Phase 1: concat hard cuts within each section (stream copy, zero RAM)
+// Phase 2: xfade between section videos in XFADE_BATCH=2 passes
+// Multi-pass binary reduction keeps peak RSS flat at ~80 MB per pass (720p).
+async function chainXfadeTransitions(clipPaths, clipDurations, outputPath, sectionBoundaries) {
+    if (clipPaths.length === 0)
+        throw new Error("No cuts to chain");
+    if (clipPaths.length === 1) {
+        await fs.copyFile(clipPaths[0], outputPath);
+        return;
+    }
+    const tmpDir = path.dirname(outputPath);
+    // Phase 1: concat within each section
+    const boundaries = [0, ...sectionBoundaries, clipPaths.length];
+    const sectionVideos = [];
+    const sectionDurations = [];
+    for (let s = 0; s < boundaries.length - 1; s++) {
+        const start = boundaries[s];
+        const end = boundaries[s + 1];
+        const sClips = clipPaths.slice(start, end);
+        const sDurs = clipDurations.slice(start, end);
+        if (sClips.length === 0)
+            continue;
+        const sectionOut = path.join(tmpDir, `section_joined_${s}.mp4`);
+        await concatClips(sClips, sectionOut);
+        sectionVideos.push(sectionOut);
+        sectionDurations.push(sDurs.reduce((a, b) => a + b, 0));
+    }
+    if (sectionVideos.length === 1) {
+        await fs.copyFile(sectionVideos[0], outputPath);
+        return;
+    }
+    // Phase 2: xfade between section videos — binary reduction passes
+    let currentVideos = sectionVideos;
+    let currentDurations = sectionDurations;
+    let pass = 0;
+    while (currentVideos.length > 1) {
+        const nextVideos = [];
+        const nextDurations = [];
+        for (let b = 0; b < currentVideos.length; b += XFADE_BATCH) {
+            const bClips = currentVideos.slice(b, b + XFADE_BATCH);
+            const bDurs = currentDurations.slice(b, b + XFADE_BATCH);
+            const bOut = path.join(tmpDir, `xfade_pass${pass}_b${b}.mp4`);
+            await xfadeSmallBatch(bClips, bDurs, bOut);
+            const bDur = bDurs.reduce((a, d) => a + d, 0) - (bClips.length - 1) * TRANSITION_DURATION;
+            nextVideos.push(bOut);
+            nextDurations.push(bDur);
+        }
+        currentVideos = nextVideos;
+        currentDurations = nextDurations;
+        pass++;
+    }
+    await fs.copyFile(currentVideos[0], outputPath);
+}
+// ─── Merge voiceover audio tracks ────────────────────────────────────────────
 async function mergeAudio(audioPaths, outputPath) {
     if (audioPaths.length === 0) {
-        // Generate 5 seconds of silence as emergency fallback
         await ffmpeg([
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", "5", "-q:a", "9", "-acodec", "libmp3lame",
-            "-y", outputPath,
+            "-t", "5", "-c:a", "aac", "-b:a", "128k", "-y", outputPath,
         ]);
         return;
     }
@@ -165,58 +299,66 @@ async function mergeAudio(audioPaths, outputPath) {
     }
     const inputs = [];
     audioPaths.forEach((p) => inputs.push("-i", p));
-    const filterComplex = audioPaths
-        .map((_, i) => `[${i}:a]`)
-        .join("") + `concat=n=${audioPaths.length}:v=0:a=1[a]`;
+    const filterComplex = audioPaths.map((_, i) => `[${i}:a]`).join("") +
+        `concat=n=${audioPaths.length}:v=0:a=1[a]`;
     await ffmpeg([
         ...inputs,
         "-filter_complex", filterComplex,
         "-map", "[a]",
-        "-c:a", "libmp3lame", "-q:a", "4",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
         "-y", outputPath,
     ]);
 }
-async function concatWithTransitions(clipPaths, clipDurations, outputPath) {
-    if (clipPaths.length === 1) {
-        await fs.copyFile(clipPaths[0], outputPath);
-        return;
+// ─── Burn captions + mix BGM + upscale 720p → 1080p ─────────────────────────
+// This is the only step that targets final output quality (CRF 23).
+// Upscale from INTERMEDIATE (720p) to OUTPUT (1080p) happens here in one pass —
+// no separate upscale step needed, lanczos gives sharp results.
+async function finalMixWithCaptions(videoPath, voiceoverPath, bgmPath, srtPath, outputPath) {
+    const font = await resolveFont();
+    // Always upscale intermediates (720p) → final output (1080p)
+    const upscaleFilter = `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos`;
+    let videoFilter = upscaleFilter;
+    if (srtPath) {
+        try {
+            await fs.access(srtPath);
+            const srtContent = await fs.readFile(srtPath, "utf8");
+            if (srtContent.trim().length > 0) {
+                const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+                const captionFilter = font
+                    ? `subtitles='${escapedSrt}':force_style='FontName=DejaVu Sans Bold,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=50'`
+                    : `subtitles='${escapedSrt}'`;
+                // upscale first, then burn captions at full 1080p resolution
+                videoFilter = `${upscaleFilter},${captionFilter}`;
+            }
+        }
+        catch {
+            console.warn("[assembler] SRT not found, skipping captions");
+        }
     }
-    const inputs = [];
-    clipPaths.forEach((p) => inputs.push("-i", p));
-    const TRANS_DUR = 0.5;
-    let filterGraph = "";
-    let prevLabel = "[0:v]";
-    let timeOffset = 0;
-    for (let i = 1; i < clipPaths.length; i++) {
-        const outLabel = i === clipPaths.length - 1 ? "[vout]" : `[v${i}]`;
-        timeOffset += clipDurations[i - 1] - TRANS_DUR;
-        const transition = pickTransition(i - 1);
-        filterGraph += `${prevLabel}[${i}:v]xfade=transition=${transition}:duration=${TRANS_DUR}:offset=${timeOffset.toFixed(3)}${outLabel};`;
-        prevLabel = outLabel;
-    }
-    await ffmpeg([
-        ...inputs,
-        "-filter_complex", filterGraph.slice(0, -1),
-        "-map", "[vout]",
-        "-c:v", "libx264", "-crf", "21", "-preset", "fast",
-        "-r", "25", "-an", "-y", outputPath,
-    ]);
-}
-async function finalMix(videoPath, voiceoverPath, bgmPath, outputPath) {
-    const hasBgm = bgmPath !== null;
-    const inputs = ["-i", videoPath, "-i", voiceoverPath];
-    if (hasBgm)
-        inputs.push("-i", bgmPath);
-    // NOTE: never use apad — it creates an infinite stream and hangs FFmpeg.
-    // Use -shortest to stop encoding when the video track ends.
-    if (hasBgm) {
+    // Always re-encode — upscaling means copy is never valid here
+    const videoFilterArgs = ["-vf", videoFilter];
+    const videoCodecArgs = [
+        "-threads", String(THREADS),
+        "-c:v", "libx264",
+        "-crf", "23",
+        "-preset", "veryfast",
+    ];
+    if (bgmPath) {
+        const voDuration = await ffprobe(voiceoverPath);
+        const fadeOutStart = Math.max(voDuration - BGM_FADE_OUT, 0);
         await ffmpeg([
-            ...inputs,
-            "-filter_complex", "[2:a]volume=0.08[bgm];[1:a][bgm]amix=inputs=2:duration=shortest[a]",
+            "-i", videoPath,
+            "-i", voiceoverPath,
+            "-stream_loop", "-1", "-i", bgmPath,
+            "-filter_complex", [
+                `[2:a]volume=${BGM_VOLUME},afade=t=in:st=0:d=${BGM_FADE_IN},afade=t=out:st=${fadeOutStart.toFixed(2)}:d=${BGM_FADE_OUT}[bgm]`,
+                `[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[audio]`,
+            ].join(";"),
             "-map", "0:v",
-            "-map", "[a]",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-map", "[audio]",
+            ...videoFilterArgs,
+            ...videoCodecArgs,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
             "-shortest",
             "-movflags", "+faststart",
             "-y", outputPath,
@@ -224,82 +366,245 @@ async function finalMix(videoPath, voiceoverPath, bgmPath, outputPath) {
     }
     else {
         await ffmpeg([
-            ...inputs,
+            "-i", videoPath,
+            "-i", voiceoverPath,
             "-map", "0:v",
             "-map", "1:a",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            ...videoFilterArgs,
+            ...videoCodecArgs,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
             "-shortest",
             "-movflags", "+faststart",
             "-y", outputPath,
         ]);
     }
 }
+// ─── Thumbnail ────────────────────────────────────────────────────────────────
+// Pull from final 1080p output — no upscale needed here
 async function extractThumbnail(videoPath, thumbPath) {
     await ffmpeg([
-        "-ss", "6", "-i", videoPath,
+        "-ss", "4", "-i", videoPath,
         "-vframes", "1",
-        "-vf", "scale=1280:720",
+        "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
         "-y", thumbPath,
     ]);
 }
+// ─── Black clip fallback ──────────────────────────────────────────────────────
+// Uses INTERMEDIATE dimensions — consistent with all other intermediate renders
+async function makeBlackClip(outPath, durationSec) {
+    await ffmpeg([
+        "-f", "lavfi", "-i", `color=c=black:size=${INTERMEDIATE_WIDTH}x${INTERMEDIATE_HEIGHT}:rate=${FPS}`,
+        "-t", String(durationSec),
+        "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+        "-an", "-y", outPath,
+    ]);
+}
+// ─── Unique clip picker (round-robin / max-spacing) ───────────────────────────
+// Scores every candidate by how long ago it was last used.
+// Guarantees clips are spaced as far apart as possible across the whole video.
+function makeUniqueClipPicker(globalClipPool) {
+    const lastUsedAt = new Map();
+    let callCount = 0;
+    return function getUniqueClip(sectionPool) {
+        if (globalClipPool.length === 0)
+            return null;
+        callCount++;
+        let bestPath = globalClipPool[0];
+        let bestScore = -Infinity;
+        // LOCAL_BONUS = 2× pool size means an unused local clip always beats
+        // an unused global clip, but a recently-used local clip (age=1,2,3...)
+        // loses to any global clip that hasn't been used in a while.
+        const LOCAL_BONUS = globalClipPool.length * 2;
+        for (const p of sectionPool) {
+            const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
+            const score = age + LOCAL_BONUS;
+            if (score > bestScore) {
+                bestScore = score;
+                bestPath = p;
+            }
+        }
+        for (const p of globalClipPool) {
+            const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
+            if (age > bestScore) {
+                bestScore = age;
+                bestPath = p;
+            }
+        }
+        lastUsedAt.set(bestPath, callCount);
+        return bestPath;
+    };
+}
+// ─── Step manifest ────────────────────────────────────────────────────────────
 export const RENDER_STEPS = [
-    { label: "Processing video clips (Ken Burns + overlays)", done: false },
+    { label: "Slicing sections into fast cuts", done: false },
+    { label: "Pre-rendering cuts with Ken Burns motion", done: false },
     { label: "Merging voiceover audio tracks", done: false },
-    { label: "Concatenating clips with transitions", done: false },
-    { label: "Mixing audio (voiceover + music bed)", done: false },
+    { label: "Generating SRT captions", done: false },
+    { label: "Chaining cuts with xfade transitions", done: false },
+    { label: "Mixing audio + burning captions", done: false },
     { label: "Generating thumbnail", done: false },
-    { label: "Encoding final H.264 MP4", done: false },
 ];
-export async function assemble(videoId, videoTitle, sections, audioPaths, footagePaths, bgmPath, outputDir, onProgress) {
+// ─── Main assembly entry point ────────────────────────────────────────────────
+export async function assemble(videoId, videoTitle, sections, audioPaths, footagePathsPerSection, bgmPath, outputDir, onProgress) {
     const tmpDir = path.join("/tmp/vidrush", videoId);
     await fs.mkdir(tmpDir, { recursive: true });
     await fs.mkdir(outputDir, { recursive: true });
     const total = RENDER_STEPS.length;
-    // Step 1: Process each clip
-    onProgress(0, total, RENDER_STEPS[0].label);
-    const processedClips = [];
-    const clipDurations = [];
-    const validAudio = [];
+    // ── Build global clip pool ───────────────────────────────────────────────
+    const globalClipPool = [];
+    for (const paths of footagePathsPerSection) {
+        if (paths) {
+            for (const p of paths) {
+                if (!globalClipPool.includes(p))
+                    globalClipPool.push(p);
+            }
+        }
+    }
+    console.log(`[assembler] global clip pool: ${globalClipPool.length} unique clips`);
+    // Returns a section's own clips, or borrows from the global pool at a
+    // staggered offset so adjacent sections that fall back look different.
+    const getClipsForSection = (i) => {
+        const own = footagePathsPerSection[i];
+        if (own && own.length > 0)
+            return own;
+        if (globalClipPool.length === 0)
+            return [];
+        const offset = (i * 3) % globalClipPool.length;
+        const N = Math.min(4, globalClipPool.length);
+        const borrowed = [];
+        for (let k = 0; k < N; k++) {
+            borrowed.push(globalClipPool[(offset + k) % globalClipPool.length]);
+        }
+        console.log(`[assembler] Section ${i}: no footage, borrowing ${borrowed.length} clips from pool`);
+        return borrowed;
+    };
+    // Shared unique clip picker — max-spacing across the entire video
+    const getUniqueClip = makeUniqueClipPicker(globalClipPool);
+    // ── Step 1: Plan cuts ────────────────────────────────────────────────────
+    await onProgress(0, total, RENDER_STEPS[0].label);
+    const cutPlan = [];
+    const validAudioForSection = [];
     for (let i = 0; i < sections.length; i++) {
-        const section = sections[i];
         const audioPath = audioPaths[i];
-        let footagePath = footagePaths[i];
+        if (!audioPath) {
+            cutPlan.push([]);
+            validAudioForSection.push(null);
+            continue;
+        }
+        const audioDuration = await ffprobe(audioPath);
+        if (audioDuration <= 0) {
+            cutPlan.push([]);
+            validAudioForSection.push(null);
+            continue;
+        }
+        validAudioForSection.push(audioPath);
+        const cutDurations = sliceCuts(audioDuration);
+        const availableClips = getClipsForSection(i);
+        const sectionCuts = [];
+        for (let ci = 0; ci < cutDurations.length; ci++) {
+            const clipPath = getUniqueClip(availableClips);
+            sectionCuts.push({ clipPath: clipPath ?? "", durationSec: cutDurations[ci] });
+        }
+        cutPlan.push(sectionCuts);
+    }
+    const totalCuts = cutPlan.reduce((sum, c) => sum + c.length, 0);
+    console.log(`[assembler] ${sections.length} sections → ${totalCuts} cuts planned`);
+    // ── Step 2: Pre-render each cut with Ken Burns ───────────────────────────
+    await onProgress(1, total, RENDER_STEPS[1].label);
+    const renderedCuts = [];
+    const renderedDurations = [];
+    const audioForRenderedCuts = [];
+    const sectionBoundaries = [];
+    let globalMotionIdx = 0;
+    for (let i = 0; i < sections.length; i++) {
+        const cuts = cutPlan[i];
+        if (cuts.length === 0)
+            continue;
+        const audioPath = validAudioForSection[i];
         if (!audioPath)
             continue;
-        if (!footagePath && section.section_type !== "stat" && section.section_type !== "graphic") {
-            footagePath = path.join(tmpDir, `black_${i}.mp4`);
-            const dur = await ffprobe(audioPath) + 0.5;
-            await ffmpeg([
-                "-f", "lavfi", "-i", `color=c=black:size=1920x1080:rate=25`,
-                "-t", String(dur), "-c:v", "libx264", "-an", "-y", footagePath,
-            ]);
+        if (renderedCuts.length > 0)
+            sectionBoundaries.push(renderedCuts.length);
+        for (let ci = 0; ci < cuts.length; ci++) {
+            const { clipPath, durationSec } = cuts[ci];
+            const motionType = MOTION_CYCLE[globalMotionIdx % MOTION_CYCLE.length];
+            globalMotionIdx++;
+            const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
+            if (!clipPath) {
+                console.warn(`[assembler] Section ${i} cut ${ci}: no clip available, using black`);
+                await makeBlackClip(outPath, durationSec);
+                renderedCuts.push(outPath);
+                renderedDurations.push(durationSec);
+                continue;
+            }
+            try {
+                await renderCut(clipPath, durationSec, motionType, outPath);
+                renderedCuts.push(outPath);
+                renderedDurations.push(durationSec);
+            }
+            catch (err) {
+                console.error(`[assembler] Ken Burns failed for cut ${i}/${ci}:`, err.message);
+                // Fallback 1: simple scale to intermediate resolution
+                const fallbackPath = path.join(tmpDir, `scaled_${i}_${ci}.mp4`);
+                try {
+                    const rawDur = await ffprobe(clipPath);
+                    const loopArgs = rawDur < durationSec ? ["-stream_loop", "-1"] : [];
+                    await ffmpeg([
+                        ...loopArgs, "-i", clipPath,
+                        "-vf", `scale=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
+                        "-t", String(durationSec), "-r", String(FPS),
+                        "-threads", String(THREADS), "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+                        "-an", "-y", fallbackPath,
+                    ]);
+                    renderedCuts.push(fallbackPath);
+                    renderedDurations.push(durationSec);
+                }
+                catch {
+                    // Fallback 2: black clip
+                    const blackPath = path.join(tmpDir, `black_${i}_${ci}.mp4`);
+                    await makeBlackClip(blackPath, durationSec);
+                    renderedCuts.push(blackPath);
+                    renderedDurations.push(durationSec);
+                }
+            }
         }
-        const outClip = path.join(tmpDir, `processed_${i}.mp4`);
-        const duration = await processClip(footagePath || "", audioPath, section, i, outClip, i === 0 ? videoTitle : undefined);
-        processedClips.push(outClip);
-        clipDurations.push(duration);
-        validAudio.push(audioPath);
+        audioForRenderedCuts.push(audioPath);
     }
-    if (processedClips.length === 0) {
-        throw new Error("No clips could be processed — all audio and footage failed. Check MINIMAX_API_KEY, PEXELS_API_KEY and PIXABAY_API_KEY.");
+    if (renderedCuts.length === 0) {
+        throw new Error("No cuts could be rendered — check that audio was generated.");
     }
-    // Step 2: Merge audio
-    onProgress(1, total, RENDER_STEPS[1].label);
-    const mergedAudio = path.join(tmpDir, "voiceover_merged.mp3");
-    await mergeAudio(validAudio, mergedAudio);
-    // Step 3: Concatenate video
-    onProgress(2, total, RENDER_STEPS[2].label);
-    const concatVideo = path.join(tmpDir, "concat.mp4");
-    await concatWithTransitions(processedClips, clipDurations, concatVideo);
-    // Step 4: Mix audio
-    onProgress(3, total, RENDER_STEPS[3].label);
+    console.log(`[assembler] ${renderedCuts.length} cuts rendered, ${sectionBoundaries.length} section boundaries`);
+    // ── Step 3: Merge voiceover audio ────────────────────────────────────────
+    await onProgress(2, total, RENDER_STEPS[2].label);
+    const mergedAudio = path.join(tmpDir, "voiceover_merged.aac");
+    await mergeAudio(audioForRenderedCuts, mergedAudio);
+    // ── Step 4: Generate SRT captions ────────────────────────────────────────
+    await onProgress(3, total, RENDER_STEPS[3].label);
+    const srtPath = path.join(tmpDir, "captions.srt");
+    try {
+        await generateSrt(sections, audioPaths, srtPath);
+        console.log(`[assembler] SRT written to ${srtPath}`);
+    }
+    catch (err) {
+        console.warn("[assembler] SRT generation failed, captions will be skipped:", err);
+    }
+    // ── Step 5: Chain all cuts with xfade transitions ────────────────────────
+    await onProgress(4, total, RENDER_STEPS[4].label);
+    const transitionedVideo = path.join(tmpDir, "transitioned.mp4");
+    await chainXfadeTransitions(renderedCuts, renderedDurations, transitionedVideo, sectionBoundaries);
+    // ── Step 6: Final mix — upscale + audio + BGM + captions ─────────────────
+    await onProgress(5, total, RENDER_STEPS[5].label);
     const finalMp4 = path.join(outputDir, "final.mp4");
-    await finalMix(concatVideo, mergedAudio, bgmPath, finalMp4);
-    // Step 5: Thumbnail
-    onProgress(4, total, RENDER_STEPS[4].label);
+    let srtExists = false;
+    try {
+        const srtStat = await fs.stat(srtPath);
+        srtExists = srtStat.size > 0;
+    }
+    catch { }
+    await finalMixWithCaptions(transitionedVideo, mergedAudio, bgmPath, srtExists ? srtPath : null, finalMp4);
+    // ── Step 7: Thumbnail ─────────────────────────────────────────────────────
+    await onProgress(6, total, RENDER_STEPS[6].label);
     const thumbPath = path.join(outputDir, "thumb.jpg");
     await extractThumbnail(finalMp4, thumbPath);
-    onProgress(5, total, RENDER_STEPS[5].label);
     return { videoPath: finalMp4, thumbPath };
 }
