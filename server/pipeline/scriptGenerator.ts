@@ -106,14 +106,12 @@ async function callCerebras(messages: { role: string; content: string }[]): Prom
     console.log(`[cerebras] body preview: ${responseText.slice(0, 300)}`);
 
     if (!response.ok) {
-      // 429 = rate limit — caller will retry with backoff
       throw new Error(`Cerebras API error ${response.status}: ${responseText}`);
     }
 
     const data = JSON.parse(responseText) as any;
     const choice = data.choices?.[0];
 
-    // Detect silent truncation — broken JSON guaranteed if we proceed
     if (choice?.finish_reason === "length") {
       throw new Error(`Cerebras truncated response (finish_reason: length) — will retry with fewer words`);
     }
@@ -159,10 +157,15 @@ STRICT RULES:
 - Section ${startId} must have section_type: "${firstType}"${isLast ? `\n- Section ${startId + count - 1} must have section_type: "${lastType}"` : ""}
 - All middle sections: "broll" or "stat" (stat = has numbers/dates/statistics)
 - narration: MUST be ${wordsPerSection} to ${wordsPerSection + 10} words. Count carefully. Never write less than ${wordsPerSection} words.
-- visual_keywords: 3 SPECIFIC searchable phrases for Pexels/Pixabay stock footage.
-  GOOD: "close up white bed sheets", "pest spray bottle kitchen counter", "insect magnified crawling wood surface"
-  BAD: "cinematic", "background", "dramatic footage", "visual", "scene", "abstract"
-  Each keyword must describe the exact visual content relevant to that section's topic.
+- visual_keywords: 3 SPECIFIC searchable stock footage phrases directly about "${title}".
+  RULES FOR KEYWORDS:
+  * Each keyword = visible subject + action + setting. All 3 must relate to "${title}".
+  * Think: what would someone search on Pexels/Pixabay to find a video clip for this exact section?
+  * GOOD examples for "how to get rid of bed bugs": "bed bug crawling white mattress close up", "pest control spray bottle bedroom", "person sealing mattress encasement cover"
+  * GOOD examples for "how to make money online": "person typing laptop home office", "paypal payment notification phone screen", "freelancer working desk coffee shop"
+  * GOOD examples for "healthy breakfast recipes": "oatmeal bowl fruits close up kitchen", "person blending smoothie counter", "eggs cooking pan morning light"
+  * BAD: "cinematic", "background", "dramatic", "visual", "scene", "abstract", "nature", "landscape", "people walking", any word not related to "${title}"
+  * NEVER use generic filler words. Every keyword must be specific to "${title}" and this section's narration.
 - Output ONLY the JSON array. No markdown, no explanation, no extra text.`;
 
   const raw = await callCerebras([
@@ -184,7 +187,7 @@ STRICT RULES:
     narration: String(sec.narration || "").trim(),
     visual_keywords: Array.isArray(sec.visual_keywords)
       ? sec.visual_keywords.slice(0, 3).map(String)
-      : ["people walking street"],
+      : [title.toLowerCase().slice(0, 40)],
     section_type: ["intro", "broll", "stat", "graphic", "outro"].includes(sec.section_type)
       ? sec.section_type
       : "broll",
@@ -224,8 +227,6 @@ Output ONLY the JSON object.`;
     }
   }
 
-  // Batch size 4 (not 5) — keeps output tokens ~1600 per call,
-  // well under the truncation threshold even at 110 words/section
   const BATCH_SIZE = 4;
   const allSections: ScriptSection[] = [];
 
@@ -237,7 +238,6 @@ Output ONLY the JSON object.`;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        // On retry, reduce words slightly to avoid hitting length limit again
         const adjustedWords = attempt === 1 ? wordsPerSection : Math.floor(wordsPerSection * 0.88);
         const sections = await generateSectionBatch(
           title, startId, batchCount, adjustedWords, isFirst, isLast
@@ -248,14 +248,12 @@ Output ONLY the JSON object.`;
       } catch (err) {
         const msg = (err as Error).message;
         console.error(`Batch ${startId} attempt ${attempt} failed:`, msg);
-        // 429 = rate limit, wait longer; other errors = shorter wait
         const delay = msg.includes("429") ? 20000 : 6000 * attempt;
         if (attempt < 3) await sleep(delay);
         else throw new Error(`Failed to generate sections ${startId}-${startId + batchCount - 1}: ${msg}`);
       }
     }
 
-    // Pause between batches to stay under Cerebras free tier TPM
     if (batchStart + BATCH_SIZE < count) await sleep(2000);
   }
 

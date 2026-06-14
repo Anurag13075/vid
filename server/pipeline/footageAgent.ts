@@ -24,29 +24,20 @@ function pickBestPixabayUrl(hit: any): string {
   );
 }
 
-// Broad enough to always return results, specific enough to look decent
-const FALLBACK_KEYWORDS = [
-  "nature forest sunlight trees",
-  "aerial city buildings skyline",
-  "ocean waves beach sunset",
-  "mountain landscape snow peaks",
-  "urban street people walking",
-  "science laboratory equipment closeup",
-  "hands working close up detail",
-  "sky clouds timelapse blue",
-  "river waterfall rocks flowing",
-  "farm field harvest crops",
-  "technology computer screen typing",
-  "desert sand dunes golden",
-  "rain window glass drops",
-  "fire flames burning closeup",
-  "crowd people event gathering",
-];
+// Stop words to strip when building topic fallback keywords from user's title
+const STOP_WORDS = new Set([
+  "from", "with", "that", "this", "your", "have", "will", "into", "they",
+  "them", "then", "than", "when", "what", "which", "how", "for", "and",
+  "the", "get", "rid", "but", "not", "can", "its", "are", "was", "has",
+  "top", "best", "ways", "tips", "easy", "simple", "ultimate", "guide",
+  "about", "some", "more", "very", "just", "been", "also", "over", "such",
+]);
 
-// Keywords that return useless stock footage — skip them and fall to fallback
+// Keywords that return useless generic stock footage — skip them
 const BANNED_TERMS = [
   "cinematic", "background", "footage", "dramatic", "visual",
   "scene", "abstract", "generic", "video", "clip", "broll", "b-roll",
+  "nature", "landscape", "beautiful", "stunning",
 ];
 
 function sanitizeKeyword(kw: string): string {
@@ -54,6 +45,39 @@ function sanitizeKeyword(kw: string): string {
   if (lower.length < 4) return "";
   if (BANNED_TERMS.some(b => lower.includes(b))) return "";
   return lower;
+}
+
+// Build topic-specific fallback keywords from the user's prompt title
+function buildTopicFallbacks(title: string, section: ScriptSection): string[] {
+  const words = title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  // Use up to 4 most meaningful words from the title
+  const coreWords = words.slice(0, 4).join(" ");
+  const fallbacks: string[] = [];
+
+  if (coreWords) {
+    fallbacks.push(coreWords);
+    fallbacks.push(`${coreWords} close up`);
+    fallbacks.push(`${coreWords} tutorial`);
+    fallbacks.push(`${coreWords} demonstration`);
+  }
+
+  // Also try key_point if available
+  if (section.key_point) {
+    const kp = section.key_point.toLowerCase().slice(0, 50);
+    if (kp.length > 4) fallbacks.push(kp);
+  }
+
+  // Try first 2 words of title as a broader fallback
+  if (words.length >= 2) {
+    fallbacks.push(words.slice(0, 2).join(" "));
+  }
+
+  return fallbacks.filter(Boolean);
 }
 
 async function searchPexels(
@@ -183,29 +207,30 @@ export async function findMultipleFootage(
   section: ScriptSection,
   limit: number,
   videoId: string,
-  usedIds: Set<string>
+  usedIds: Set<string>,
+  title: string
 ): Promise<Clip[]> {
   const clips: Clip[] = [];
   const clipsNeeded = limit || CLIPS_PER_SECTION;
 
-  // Strip generic keywords — they return unrelated stock footage
+  // Strip generic/banned keywords — they return unrelated stock footage
   const cleanKeywords = section.visual_keywords
     .map(sanitizeKeyword)
     .filter(Boolean);
 
-  // If all keywords were generic, derive something from key_point or title
+  // If all keywords were generic, fall back to key_point or title words
   const keywordsToTry = cleanKeywords.length > 0
     ? cleanKeywords
-    : [section.key_point?.toLowerCase().slice(0, 40) || FALLBACK_KEYWORDS[0]];
+    : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)];
 
-  // Phase 1: specific keywords → Pexels
+  // Phase 1: AI-generated specific keywords → Pexels
   for (const keyword of keywordsToTry) {
     if (clips.length >= clipsNeeded) break;
     const found = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
     clips.push(...found);
   }
 
-  // Phase 2: specific keywords → Pixabay
+  // Phase 2: AI-generated specific keywords → Pixabay
   if (clips.length < clipsNeeded) {
     for (const keyword of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
@@ -214,9 +239,12 @@ export async function findMultipleFootage(
     }
   }
 
-  // Phase 3: fallback keywords → Pexels then Pixabay
+  // Phase 3: topic-derived fallback from user's title — NOT generic nature/sky shots
   if (clips.length < clipsNeeded) {
-    for (const keyword of FALLBACK_KEYWORDS) {
+    const topicFallbacks = buildTopicFallbacks(title, section);
+    console.log(`[footage] Phase 3 fallback for "${keywordsToTry[0]}": trying topic keywords:`, topicFallbacks);
+
+    for (const keyword of topicFallbacks) {
       if (clips.length >= clipsNeeded) break;
       const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
       clips.push(...pexelsFound);

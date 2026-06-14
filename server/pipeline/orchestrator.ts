@@ -3,11 +3,9 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover } from "./voiceover.js";
-import { createClipTracker,    findMultipleFootage  ,downloadClip} from "./footageAgent.js";
-
+import { createClipTracker, findMultipleFootage, downloadClip } from "./footageAgent.js";
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
-
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./queue.js";
@@ -56,7 +54,7 @@ async function runPipeline(videoId: string) {
 
   const { title, voice, length } = video;
 
-  // Clean up any leftover temp dirs from previous runs to keep /tmp lean
+  // Clean up leftover temp dirs from previous runs
   const vidrushTmp = path.join("/tmp/vidrush");
   try {
     const existing = await fs.readdir(vidrushTmp).catch(() => []);
@@ -80,7 +78,7 @@ async function runPipeline(videoId: string) {
     await emit(videoId, {
       stage: "writing" as Stage,
       progress: 15,
-      message: "Generating script with Claude AI...",
+      message: "Generating script...",
     });
 
     const script = await withRetry(() => generateScript(title, length));
@@ -96,7 +94,7 @@ async function runPipeline(videoId: string) {
     await emit(videoId, {
       stage: "voiceover" as Stage,
       progress: 32,
-      message: `Generating voiceover with MiniMax TTS...`,
+      message: `Generating voiceover...`,
       script,
     });
 
@@ -130,14 +128,12 @@ async function runPipeline(videoId: string) {
     }
 
     // ── Phase 3: Footage search ─────────────────────────────────────────
-    // FIX: create a per-job usedIds tracker instead of calling resetUsedClips()
-    // (module-level state leaked across concurrent jobs in the old design)
     const usedIds = createClipTracker();
 
-    // Pre-initialize: graphic/empty sections are skipped immediately
     const clips: Clip[] = script.sections.map((s) => ({
       id: s.id,
-      keyword: s.visual_keywords[0] || "cinematic background", // first keyword only
+      // Show the first keyword in the UI so user can see what's being searched
+      keyword: s.visual_keywords[0] || title.toLowerCase().slice(0, 40),
       thumbUrl: "",
       videoUrl: "",
       source: "pexels" as const,
@@ -156,13 +152,9 @@ async function runPipeline(videoId: string) {
       clips,
     });
 
-    // Pre-initialize results array
     const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
 
-    // Hard cap per section: search (~10s) + 1 SD download (~20s max) = ~30s
     const SECTION_HARD_CAP_MS = 35_000;
-
-    // Process in parallel batches of 2 to limit concurrent network pressure
     const BATCH_SIZE = 2;
 
     for (let batchStart = 0; batchStart < script.sections.length; batchStart += BATCH_SIZE) {
@@ -176,19 +168,17 @@ async function runPipeline(videoId: string) {
         batchIndices.map(async (i) => {
           const section = script.sections[i];
 
-          // Skip graphic sections and sections with no audio
           if (section.section_type === "graphic" || !section.narration.trim() || !audioPaths[i]) {
             footagePathsPerSection[i] = null;
-            // status already "skipped" from initialization
             return;
           }
 
           clips[i] = { ...clips[i], status: "downloading" };
 
-          // Emit per-section start so UI reflects current activity immediately
           const readyCountPre = clips.filter((c) => c.status === "ready").length;
           const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
           const pctPre = 50 + Math.round((i / script.sections.length) * 18);
+
           await emit(videoId, {
             stage: "footage" as Stage,
             progress: pctPre,
@@ -197,14 +187,10 @@ async function runPipeline(videoId: string) {
             clips: [...clips],
           });
 
-          // Wrap entire search+download in a hard cap to prevent any single
-          // slow/hanging section from stalling the whole pipeline
           const sectionWork = async () => {
             try {
-              // 1 clip per section — search is instant, 1 download fits in the cap.
-              // The assembler's global pool fills any sections that fail with
-              // borrowed clips at staggered offsets for visual variety.
-              const foundClips = await findMultipleFootage(section, 12, videoId, usedIds);
+              // Pass title so footage fallback stays on-topic with user's prompt
+              const foundClips = await findMultipleFootage(section, 12, videoId, usedIds, title);
 
               if (foundClips.length > 0) {
                 const downloadedPaths: string[] = [];
@@ -235,9 +221,6 @@ async function runPipeline(videoId: string) {
             }
           };
 
-          // IMPORTANT: clearTimeout is required. Without it, the callback fires 35s
-          // later even after sectionWork() already succeeded, overwriting the good
-          // clips/footagePaths with null — making all sections appear to have failed.
           let hardTimeoutId: ReturnType<typeof setTimeout>;
           const hardTimeout = new Promise<void>((resolve) => {
             hardTimeoutId = setTimeout(() => {
@@ -255,7 +238,6 @@ async function runPipeline(videoId: string) {
         })
       );
 
-      // Emit progress after each batch completes
       const readyCount = clips.filter((c) => c.status === "ready").length;
       const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
       const pct = 50 + Math.round((batchEnd / script.sections.length) * 18);
@@ -268,11 +250,6 @@ async function runPipeline(videoId: string) {
         clips: [...clips],
       });
     }
-    // footagePathsPerSection: up to 3 diverse clips per section for 3-4s cuts
-    // (NOTE: removed the old duplicate sequential loop that re-searched/re-downloaded
-    // footage for every section a second time and pushed mismatched entries into
-    // footagePathsPerSection, doubling search time and misaligning the array passed
-    // to assemble())
 
     // ── Phase 4: Assembly ───────────────────────────────────────────────
     const renderSteps = RENDER_STEPS.map((s) => ({ ...s }));
@@ -290,7 +267,6 @@ async function runPipeline(videoId: string) {
     await fs.mkdir(outputDir, { recursive: true });
 
     const bgmPath = await findBgm(script.mood);
-
     const validAudioPaths: (string | null)[] = script.sections.map((_, i) => audioPaths[i] || null);
 
     const { videoPath, thumbPath } = await assemble(
@@ -341,9 +317,9 @@ async function runPipeline(videoId: string) {
 
     console.log(`✅ Video ${videoId} complete: ${videoPath}`);
 
-    // Clean up temp working directory to keep /tmp lean
     const tmpDir = path.join("/tmp/vidrush", videoId);
     fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`Pipeline failed for ${videoId}:`, err);
@@ -368,10 +344,7 @@ async function findBgm(mood: string): Promise<string | null> {
         const pick = mp3s[Math.floor(Math.random() * mp3s.length)];
         return path.join(dir, pick);
       }
-    } catch {
-      // directory doesn't exist
-    }
+    } catch {}
   }
   return null;
 }
-
