@@ -2,16 +2,6 @@ import type { Script, ScriptSection } from "./types.js";
 
 const CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions";
 
-// ─── Target word counts per length ──────────────────────────────────────────
-// 130 words/min is the average TTS narration pace.
-// Token budget reality with gpt-oss-120b on Cerebras free tier (100k TPM):
-//   - Each section JSON block ≈ 200-250 tokens (narration + metadata)
-//   - 12 sections × 250 tokens = ~3000 tokens output — safely under 6000 limit
-//   - Keeps 3 retry attempts within 100k TPM (3 × 6000 = 18k per video)
-//
-// "short"  →  5-6 min  →  10 sections × 65 words  = ~650  words
-// "medium" →  8-10 min →  12 sections × 80 words  = ~960  words  ← default
-// "long"   →  12-14min →  16 sections × 80 words  = ~1280 words
 function targetSections(length: string): {
   count: number;
   label: string;
@@ -20,19 +10,16 @@ function targetSections(length: string): {
 } {
   switch (length) {
     case "short":
-      return { count: 10, label: "5-6 minutes",   wordsPerSection: 65, totalWords: 650  };
+      return { count: 8,  label: "5-6 minutes",   wordsPerSection: 60, totalWords: 480 };
     case "long":
-      return { count: 16, label: "12-14 minutes", wordsPerSection: 80, totalWords: 1280 };
+      return { count: 12, label: "12-14 minutes",  wordsPerSection: 70, totalWords: 840 };
     default:
-      return { count: 12, label: "8-10 minutes",  wordsPerSection: 80, totalWords: 960  };
+      return { count: 10, label: "8-10 minutes",   wordsPerSection: 65, totalWords: 650 };
   }
 }
 
-const SYSTEM_PROMPT = `You are a professional YouTube documentary scriptwriter.
-Output ONLY a single raw JSON object — no markdown, no code fences, no explanation.
-The JSON must be 100% valid. Every property separated by a comma. No trailing commas. No duplicate keys.`;
+const SYSTEM_PROMPT = `You are a YouTube scriptwriter. Output ONLY valid JSON, no markdown, no explanation.`;
 
-// ─── Robust JSON repair ───────────────────────────────────────────────────────
 function repairJson(raw: string): string {
   let s = raw.trim();
   s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -50,11 +37,10 @@ function repairJson(raw: string): string {
   return s;
 }
 
-// ─── Validate and normalise a parsed script ──────────────────────────────────
 function normaliseScript(parsed: any): Script {
   if (!parsed || typeof parsed !== "object") throw new Error("Script is not an object");
   if (!Array.isArray(parsed.sections)) throw new Error("Script missing sections array");
-  if (parsed.sections.length < 6) throw new Error(`Script has too few sections: ${parsed.sections.length}`);
+  if (parsed.sections.length < 4) throw new Error(`Too few sections: ${parsed.sections.length}`);
 
   const seen = new Set<number>();
   const cleaned: ScriptSection[] = [];
@@ -70,37 +56,35 @@ function normaliseScript(parsed: any): Script {
       id,
       narration: isGraphic ? "" : String(s.narration || "").trim(),
       visual_keywords: Array.isArray(s.visual_keywords)
-        ? s.visual_keywords.slice(0, 5).map(String)
+        ? s.visual_keywords.slice(0, 3).map(String)
         : ["cinematic background"],
       section_type: ["intro", "broll", "stat", "graphic", "outro"].includes(s.section_type)
         ? s.section_type
         : "broll",
       key_point: s.key_point ? String(s.key_point).slice(0, 60) : null,
-      estimated_words: Number(s.estimated_words) || 80,
+      estimated_words: Number(s.estimated_words) || 65,
       sfx: Boolean(s.sfx),
     });
   }
 
-  if (cleaned.length < 6) throw new Error("Too few valid sections after deduplication");
+  if (cleaned.length < 4) throw new Error("Too few valid sections after dedup");
 
   return {
     title: String(parsed.title || "").trim(),
     description: String(parsed.description || "").slice(0, 200),
-    mood: ["dramatic", "uplifting", "neutral", "tense"].includes(parsed.mood)
-      ? parsed.mood
-      : "neutral",
+    mood: ["dramatic", "uplifting", "neutral", "tense"].includes(parsed.mood) ? parsed.mood : "neutral",
     thumbnail_hook: String(parsed.thumbnail_hook || "").slice(0, 60),
     sections: cleaned,
   };
 }
 
-// ─── Raw fetch call to Cerebras API ─────────────────────────────────────────
+// ─── Call Cerebras API ───────────────────────────────────────────────────────
 async function callCerebras(messages: { role: string; content: string }[]): Promise<string> {
   const apiKey = process.env.CEREBRAS_API_KEY;
   if (!apiKey) throw new Error("CEREBRAS_API_KEY env variable is not set");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000);
+  const timer = setTimeout(() => controller.abort(), 90_000);
 
   try {
     const response = await fetch(CEREBRAS_API_URL, {
@@ -111,10 +95,7 @@ async function callCerebras(messages: { role: string; content: string }[]): Prom
       },
       body: JSON.stringify({
         model: "gpt-oss-120b",
-        // 6000 tokens fits a 12-section script with 80 words/section comfortably.
-        // Previously 8000 caused truncated JSON on sections 14-16 AND blew
-        // the 100k TPM rate limit across 3 retry attempts (3 × 8000 = 24k).
-        max_tokens: 6000,
+        max_tokens: 4096,
         temperature: 0.7,
         messages,
       }),
@@ -123,95 +104,170 @@ async function callCerebras(messages: { role: string; content: string }[]): Prom
 
     clearTimeout(timer);
 
+    // Log full response for debugging
+    const responseText = await response.text();
+    console.log(`[cerebras] status: ${response.status}`);
+    console.log(`[cerebras] response body (first 300 chars): ${responseText.slice(0, 300)}`);
+
     if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Cerebras API error ${response.status}: ${errText}`);
+      throw new Error(`Cerebras API error ${response.status}: ${responseText}`);
     }
 
-    const data = await response.json() as any;
-    return (data.choices?.[0]?.message?.content as string) || "{}";
+    const data = JSON.parse(responseText) as any;
+    const content = (data.choices?.[0]?.message?.content as string) || "";
+    console.log(`[cerebras] content length: ${content.length} chars`);
+    console.log(`[cerebras] content preview: ${content.slice(0, 200)}`);
+    return content || "{}";
   } catch (err: any) {
     clearTimeout(timer);
-    if (err?.name === "AbortError") {
-      throw new Error("Cerebras API request timed out after 60s");
-    }
+    if (err?.name === "AbortError") throw new Error("Cerebras API timed out after 90s");
     throw err;
   }
 }
 
-// ─── Main export ──────────────────────────────────────────────────────────────
-export async function generateScript(title: string, length: string): Promise<Script> {
-  const { count, label, wordsPerSection, totalWords } = targetSections(length);
+// ─── Generate sections in two batches to avoid token truncation ──────────────
+// A single call for 10 sections at 65 words each = ~4000 tokens output.
+// gpt-oss-120b sometimes silently truncates near the token limit leaving
+// broken JSON. Splitting into 2 calls of 5 sections each (~2000 tokens each)
+// guarantees complete JSON on every call.
+async function generateSectionBatch(
+  title: string,
+  startId: number,
+  count: number,
+  wordsPerSection: number,
+  isFirst: boolean,
+  isLast: boolean
+): Promise<ScriptSection[]> {
+  const firstType = isFirst ? "intro" : "broll";
+  const lastType = isLast ? "outro" : "broll";
 
-  const prompt = `Write a ${label} YouTube documentary script for: "${title}"
+  const prompt = `Write sections ${startId} to ${startId + count - 1} of a YouTube documentary script about: "${title}"
 
-REQUIREMENTS:
-- Exactly ${count} sections, ~${totalWords} total narration words
-- Each non-graphic section: EXACTLY ${wordsPerSection} words of narration — count every word carefully
-- Hook viewer hard in section 1 with a shocking fact or question
-- Include real stats, dates, specific details — no vague filler
-- End with strong call to action
-- Keep narration concise — do NOT exceed ${wordsPerSection + 10} words per section
-
-JSON format (valid JSON only, no markdown):
-{
-  "title": "string",
-  "description": "string (150-200 chars SEO)",
-  "mood": "dramatic|uplifting|neutral|tense",
-  "thumbnail_hook": "4-7 punchy words",
-  "sections": [
-    {
-      "id": 1,
-      "narration": "exactly ${wordsPerSection} words or empty string for graphic",
-      "visual_keywords": ["keyword1", "keyword2", "keyword3"],
-      "section_type": "intro|broll|stat|graphic|outro",
-      "key_point": "max 8 words or null",
-      "estimated_words": ${wordsPerSection},
-      "sfx": false
-    }
-  ]
-}
+Output a JSON array of exactly ${count} section objects:
+[
+  {
+    "id": ${startId},
+    "narration": "exactly ${wordsPerSection} words of spoken narration",
+    "visual_keywords": ["keyword1", "keyword2", "keyword3"],
+    "section_type": "${firstType}",
+    "key_point": "short fact or null",
+    "estimated_words": ${wordsPerSection},
+    "sfx": false
+  }
+]
 
 RULES:
-- intro: section 1 only. outro: last section only. graphic: empty narration, max 1 use
-- stat: sections with numbers/percentages/dates. broll: everything else
-- IDs sequential from 1, no gaps, no duplicates
-- Exactly ${count} sections, no more no less
-- Output ONLY the JSON object, nothing else`;
+- Section ${startId} type: "${firstType}"${isLast ? `\n- Section ${startId + count - 1} type: "${lastType}"` : ""}
+- All others: "broll" or "stat" (use stat for sections with numbers/dates)
+- narration: exactly ${wordsPerSection} words, factual, engaging, no filler
+- visual_keywords: 3 specific cinematic keywords for that scene
+- Output ONLY the JSON array, nothing else`;
+
+  const raw = await callCerebras([
+    { role: "system", content: "Output ONLY a valid JSON array. No markdown, no explanation." },
+    { role: "user", content: prompt },
+  ]);
+
+  // Extract array from response
+  let s = raw.trim();
+  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const arrStart = s.indexOf("[");
+  const arrEnd = s.lastIndexOf("]");
+  if (arrStart !== -1 && arrEnd !== -1 && arrEnd > arrStart) {
+    s = s.slice(arrStart, arrEnd + 1);
+  }
+
+  const sections = JSON.parse(s) as any[];
+  return sections.map((sec: any, i: number) => ({
+    id: typeof sec.id === "number" ? sec.id : startId + i,
+    narration: String(sec.narration || "").trim(),
+    visual_keywords: Array.isArray(sec.visual_keywords)
+      ? sec.visual_keywords.slice(0, 3).map(String)
+      : ["cinematic background"],
+    section_type: ["intro", "broll", "stat", "graphic", "outro"].includes(sec.section_type)
+      ? sec.section_type
+      : "broll",
+    key_point: sec.key_point ? String(sec.key_point).slice(0, 60) : null,
+    estimated_words: Number(sec.estimated_words) || wordsPerSection,
+    sfx: Boolean(sec.sfx),
+  }));
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+export async function generateScript(title: string, length: string): Promise<Script> {
+  const { count, label, wordsPerSection } = targetSections(length);
+
+  // Step 1: generate metadata (title, description, mood, hook) — tiny call
+  const metaPrompt = `For a YouTube documentary about "${title}", output this JSON:
+{
+  "title": "compelling title string",
+  "description": "150-200 char SEO description",
+  "mood": "dramatic",
+  "thumbnail_hook": "4-6 punchy words"
+}
+Output ONLY the JSON object.`;
 
   let lastError: Error | null = null;
+  let meta: any = {};
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const raw = await callCerebras([
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user",   content: prompt },
+        { role: "system", content: "Output ONLY valid JSON, no markdown." },
+        { role: "user", content: metaPrompt },
       ]);
-
-      console.log(`[cerebras] attempt ${attempt} raw length: ${raw.length} chars`);
-
-      let cleaned: string;
-      try { cleaned = repairJson(raw); } catch { cleaned = raw; }
-
-      let parsed: any;
-      try {
-        parsed = JSON.parse(cleaned);
-      } catch (jsonErr) {
-        console.error(`Attempt ${attempt}: JSON parse failed.\n${cleaned.slice(0, 500)}`);
-        throw new Error(`JSON parse error: ${(jsonErr as Error).message}`);
-      }
-
-      return normaliseScript(parsed);
+      const repaired = repairJson(raw);
+      meta = JSON.parse(repaired);
+      console.log("[cerebras] meta generated ok");
+      break;
     } catch (err) {
-      lastError = err as Error;
-      console.error(`Script generation attempt ${attempt} failed:`, (err as Error).message);
-      // Longer delay on 429 rate limit errors to let the TPM window reset
-      const delay = (err as Error).message.includes("429") ? 15000 : 4000 * attempt;
-      if (attempt < 3) await sleep(delay);
+      console.error(`Meta attempt ${attempt} failed:`, (err as Error).message);
+      if (attempt < 3) await sleep(5000);
     }
   }
 
-  throw lastError || new Error("Script generation failed after 3 attempts");
+  // Step 2: generate sections in batches of 5 to avoid truncation
+  const BATCH_SIZE = 5;
+  const allSections: ScriptSection[] = [];
+
+  for (let batchStart = 0; batchStart < count; batchStart += BATCH_SIZE) {
+    const batchCount = Math.min(BATCH_SIZE, count - batchStart);
+    const startId = batchStart + 1;
+    const isFirst = batchStart === 0;
+    const isLast = batchStart + batchCount >= count;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const sections = await generateSectionBatch(
+          title, startId, batchCount, wordsPerSection, isFirst, isLast
+        );
+        allSections.push(...sections);
+        console.log(`[cerebras] batch ${startId}-${startId + batchCount - 1} ok (${sections.length} sections)`);
+        break;
+      } catch (err) {
+        lastError = err as Error;
+        console.error(`Batch ${startId} attempt ${attempt} failed:`, (err as Error).message);
+        const delay = (err as Error).message.includes("429") ? 15000 : 5000 * attempt;
+        if (attempt < 3) await sleep(delay);
+        else throw new Error(`Failed to generate sections ${startId}-${startId + batchCount - 1}: ${(err as Error).message}`);
+      }
+    }
+
+    // Small pause between batches to stay under TPM limit
+    if (batchStart + BATCH_SIZE < count) await sleep(1000);
+  }
+
+  if (allSections.length < 4) {
+    throw new Error(`Only got ${allSections.length} sections, need at least 4`);
+  }
+
+  return {
+    title: String(meta.title || title).trim(),
+    description: String(meta.description || "").slice(0, 200),
+    mood: ["dramatic", "uplifting", "neutral", "tense"].includes(meta.mood) ? meta.mood : "neutral",
+    thumbnail_hook: String(meta.thumbnail_hook || "").slice(0, 60),
+    sections: allSections,
+  };
 }
 
 function sleep(ms: number): Promise<void> {
