@@ -8,6 +8,10 @@ type ProgressFn = (step: number, total: number, label: string) => void | Promise
 // ─── Constants ───────────────────────────────────────────────────────────────
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
+// Intermediates rendered at 720p — cuts RAM ~55% during Ken Burns + xfade.
+// finalMixWithCaptions upscales back to 1080p at CRF 23 in one pass.
+const INTERMEDIATE_WIDTH = 1280;
+const INTERMEDIATE_HEIGHT = 720;
 const FPS = 30;
 const TRANSITION_DURATION = 0.25;
 const BGM_VOLUME = 0.12;
@@ -15,15 +19,10 @@ const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
 
 // Railway 1 GB RAM / shared vCPU constraints:
-// - THREADS 1: shared vCPU — more threads = context-switching overhead, not speed
-// - CRF 26 for intermediates: ~20% smaller files, quality irrelevant since
-//   finalMixWithCaptions re-encodes at CRF 23
+// - THREADS 1: shared vCPU — more threads = context-switching overhead
+// - CRF 26 for intermediates: ~20% smaller, quality irrelevant (re-encoded at CRF 23 in final)
 // - PRESET "ultrafast": ~60% less RAM on libx264 motion-estimation buffers
-//   vs "veryfast". Quality difference invisible on intermediate clips.
-// - XFADE_BATCH 2: xfade holds N decoded 1080p frame buffers in memory.
-//   4 clips × ~8MB/frame × lookahead ≈ 400–600 MB → OOM kill on Railway.
-//   2 clips × ~8MB/frame ≈ 100–150 MB → safe within 1 GB ceiling.
-//   chainXfadeTransitions handles multi-pass reduction automatically.
+// - XFADE_BATCH 2: 2 clips × ~4MB/frame (720p) ≈ 60–80 MB → safe within 1 GB ceiling
 const THREADS = 1;
 const CRF = 26;
 const PRESET = "ultrafast";
@@ -59,26 +58,19 @@ async function resolveFont(): Promise<string> {
 }
 
 // ─── Build Ken Burns filter string — scale+crop approach (no zoompan) ────────
-//
-// zoompan is notoriously slow/OOM-prone on constrained containers because it
-// processes every frame in software at full resolution with floating-point zoom
-// math. The replacement approach is equivalent visually but ~10x faster:
-//
-//   1. Scale the clip to OVERSIZE (110% of output) — fast hardware path
-//   2. Use crop= with the built-in 'n' (frame number) expression to animate
-//      the crop window across the oversize canvas — cheap integer arithmetic
-//   3. Apply color grade on the already-cropped 1920x1080 frame
+// Uses INTERMEDIATE dimensions (1280x720) for all intermediate renders.
+// ~10x faster than zoompan and uses ~55% less RAM than 1080p equivalents.
 function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
   const totalFrames = Math.ceil(durationSec * FPS);
-  const w = OUTPUT_WIDTH;
-  const h = OUTPUT_HEIGHT;
+  const w = INTERMEDIATE_WIDTH;
+  const h = INTERMEDIATE_HEIGHT;
 
   const SCALE = 1.10;
-  const sw = Math.round(w * SCALE); // 2112
-  const sh = Math.round(h * SCALE); // 1188
+  const sw = Math.round(w * SCALE); // 1408
+  const sh = Math.round(h * SCALE); // 792
 
-  const dx = sw - w; // 192px horizontal travel
-  const dy = sh - h; // 108px vertical travel
+  const dx = sw - w; // 128px horizontal travel
+  const dy = sh - h; // 72px vertical travel
 
   const prog = `min(n,${totalFrames - 1})/${totalFrames - 1}`;
 
@@ -147,7 +139,7 @@ async function renderCut(
   ]);
 }
 
-// ─── Split a section into fast cuts ─────────────────────────────────────────
+// ─── Split a section into fast cuts ──────────────────────────────────────────
 function sliceCuts(audioDuration: number): number[] {
   if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
 
@@ -172,7 +164,7 @@ function sliceCuts(audioDuration: number): number[] {
   return cuts;
 }
 
-// ─── Generate SRT file from sections + audio durations ──────────────────────
+// ─── Generate SRT file from sections + audio durations ───────────────────────
 function formatSrtTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -220,11 +212,9 @@ async function generateSrt(
   await fs.writeFile(srtPath, srtContent, "utf8");
 }
 
-// ─── Concat demuxer: join clips with zero memory overhead ───────────────────
-// Reads one clip at a time — constant ~200 MB regardless of clip count.
-// Used for hard cuts within a section (stream copy = no re-encode, instant).
-// -fflags +genpts fixes wrong duration metadata that the concat demuxer
-// writes into the output file header (causes "9 min video that's really 3 min").
+// ─── Concat demuxer: join clips with zero memory overhead ────────────────────
+// Stream copy — no re-encode, constant ~200 MB RAM regardless of clip count.
+// -fflags +genpts fixes wrong duration metadata in concat output header.
 async function concatClips(clipPaths: string[], outputPath: string): Promise<void> {
   if (clipPaths.length === 0) throw new Error("No cuts to concat");
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
@@ -240,7 +230,7 @@ async function concatClips(clipPaths: string[], outputPath: string): Promise<voi
     "-safe", "0",
     "-i", listPath,
     "-c", "copy",
-    "-fflags", "+genpts", // fixes wrong duration metadata in output header
+    "-fflags", "+genpts",
     "-y", outputPath,
   ]);
 
@@ -255,7 +245,6 @@ async function xfadeSmallBatch(
 ): Promise<void> {
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
 
-  // Hard safety: never exceed XFADE_BATCH regardless of caller
   if (clipPaths.length > XFADE_BATCH) {
     return concatClips(clipPaths, outputPath);
   }
@@ -286,6 +275,10 @@ async function xfadeSmallBatch(
   ]);
 }
 
+// ─── Chain xfade transitions across all section videos ───────────────────────
+// Phase 1: concat hard cuts within each section (stream copy, zero RAM)
+// Phase 2: xfade between section videos in XFADE_BATCH=2 passes
+// Multi-pass binary reduction keeps peak RSS flat at ~80 MB per pass (720p).
 async function chainXfadeTransitions(
   clipPaths: string[],
   clipDurations: number[],
@@ -297,7 +290,7 @@ async function chainXfadeTransitions(
 
   const tmpDir = path.dirname(outputPath);
 
-  // Phase 1: concat within each section (hard cuts, stream copy, zero RAM cost)
+  // Phase 1: concat within each section
   const boundaries = [0, ...sectionBoundaries, clipPaths.length];
   const sectionVideos: string[] = [];
   const sectionDurations: number[] = [];
@@ -321,9 +314,7 @@ async function chainXfadeTransitions(
     return;
   }
 
-  // Phase 2: xfade between section videos in batches of XFADE_BATCH (2).
-  // Multi-pass binary reduction — sequential passes so GC can reclaim memory.
-  // Peak RSS stays flat at ~150 MB per pass regardless of section count.
+  // Phase 2: xfade between section videos — binary reduction passes
   let currentVideos = sectionVideos;
   let currentDurations = sectionDurations;
   let pass = 0;
@@ -378,10 +369,10 @@ async function mergeAudio(audioPaths: string[], outputPath: string): Promise<voi
   ]);
 }
 
-// ─── Burn captions + mix BGM ──────────────────────────────────────────────────
-// Final mix is the only step that targets output quality — CRF 23 here.
-// We re-encode video to burn subtitles anyway, so the quality budget is
-// correctly spent here, not on intermediates.
+// ─── Burn captions + mix BGM + upscale 720p → 1080p ─────────────────────────
+// This is the only step that targets final output quality (CRF 23).
+// Upscale from INTERMEDIATE (720p) to OUTPUT (1080p) happens here in one pass —
+// no separate upscale step needed, lanczos gives sharp results.
 async function finalMixWithCaptions(
   videoPath: string,
   voiceoverPath: string,
@@ -391,28 +382,35 @@ async function finalMixWithCaptions(
 ): Promise<void> {
   const font = await resolveFont();
 
-  let captionFilter = "";
+  // Always upscale intermediates (720p) → final output (1080p)
+  const upscaleFilter = `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos`;
+  let videoFilter = upscaleFilter;
+
   if (srtPath) {
     try {
       await fs.access(srtPath);
       const srtContent = await fs.readFile(srtPath, "utf8");
       if (srtContent.trim().length > 0) {
         const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-        captionFilter = font
+        const captionFilter = font
           ? `subtitles='${escapedSrt}':force_style='FontName=DejaVu Sans Bold,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=50'`
           : `subtitles='${escapedSrt}'`;
+        // upscale first, then burn captions at full 1080p resolution
+        videoFilter = `${upscaleFilter},${captionFilter}`;
       }
     } catch {
       console.warn("[assembler] SRT not found, skipping captions");
     }
   }
 
-  const videoFilterArgs = captionFilter ? ["-vf", captionFilter] : [];
-  // Final output: CRF 23 + veryfast (better quality than intermediates).
-  // 1 thread to stay within Railway's 1 GB ceiling during the encode.
-  const videoCodecArgs = captionFilter
-    ? ["-threads", String(THREADS), "-c:v", "libx264", "-crf", "23", "-preset", "veryfast"]
-    : ["-c:v", "copy"];
+  // Always re-encode — upscaling means copy is never valid here
+  const videoFilterArgs = ["-vf", videoFilter];
+  const videoCodecArgs = [
+    "-threads", String(THREADS),
+    "-c:v", "libx264",
+    "-crf", "23",
+    "-preset", "veryfast",
+  ];
 
   if (bgmPath) {
     const voDuration = await ffprobe(voiceoverPath);
@@ -451,7 +449,8 @@ async function finalMixWithCaptions(
   }
 }
 
-// ─── Thumbnail ───────────────────────────────────────────────────────────────
+// ─── Thumbnail ────────────────────────────────────────────────────────────────
+// Pull from final 1080p output — no upscale needed here
 async function extractThumbnail(videoPath: string, thumbPath: string): Promise<void> {
   await ffmpeg([
     "-ss", "4", "-i", videoPath,
@@ -461,31 +460,20 @@ async function extractThumbnail(videoPath: string, thumbPath: string): Promise<v
   ]);
 }
 
-// ─── Black clip fallback ─────────────────────────────────────────────────────
+// ─── Black clip fallback ──────────────────────────────────────────────────────
+// Uses INTERMEDIATE dimensions — consistent with all other intermediate renders
 async function makeBlackClip(outPath: string, durationSec: number): Promise<void> {
   await ffmpeg([
-    "-f", "lavfi", "-i", `color=c=black:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
+    "-f", "lavfi", "-i", `color=c=black:size=${INTERMEDIATE_WIDTH}x${INTERMEDIATE_HEIGHT}:rate=${FPS}`,
     "-t", String(durationSec),
     "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
     "-an", "-y", outPath,
   ]);
 }
 
-// ─── Unique clip picker (round-robin / max-spacing) ──────────────────────────
-//
-// Replaces the old "mark used, never reuse" strategy which caused the entire
-// global pool to exhaust quickly (cuts >> clips) and then pinned ALL remaining
-// cuts to globalClipPool[0] — the worst possible outcome.
-//
-// New strategy: score every candidate by how long ago it was last used.
-// The clip with the highest "age" (most cuts ago) wins. This guarantees:
-//   • clips are spaced as far apart as possible across the whole video
-//   • no single clip hogs the screen once the pool is exhausted
-//   • section-local clips are still preferred (sectionPool is scored first)
-//
-// "callCount" is a monotonic counter incremented on every pick.
-// lastUsedAt stores the callCount value at the moment each clip was chosen.
-// age = callCount - lastUsedAt  →  higher age = longer since last appearance.
+// ─── Unique clip picker (round-robin / max-spacing) ───────────────────────────
+// Scores every candidate by how long ago it was last used.
+// Guarantees clips are spaced as far apart as possible across the whole video.
 function makeUniqueClipPicker(globalClipPool: string[]) {
   const lastUsedAt = new Map<string, number>();
   let callCount = 0;
@@ -494,15 +482,12 @@ function makeUniqueClipPicker(globalClipPool: string[]) {
     if (globalClipPool.length === 0) return null;
     callCount++;
 
-    // Build the candidate list: prefer section-local clips but always
-    // fall back to the global pool so we never return null when clips exist.
     const candidates = sectionPool.length > 0 ? sectionPool : globalClipPool;
 
     let bestPath = candidates[0];
     let bestAge = -Infinity;
 
     for (const p of candidates) {
-      // Clips never used yet get age = Infinity → always picked before reuse
       const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
       if (age > bestAge) {
         bestAge = age;
@@ -510,8 +495,7 @@ function makeUniqueClipPicker(globalClipPool: string[]) {
       }
     }
 
-    // If section pool was fully exhausted (all ages == 1, i.e. just used),
-    // widen to the global pool and re-score for maximum spacing.
+    // Widen to global pool if section pool is fully exhausted
     if (bestAge <= 1 && sectionPool.length > 0 && globalClipPool.length > sectionPool.length) {
       for (const p of globalClipPool) {
         const age = callCount - (lastUsedAt.get(p) ?? -Infinity);
@@ -527,18 +511,18 @@ function makeUniqueClipPicker(globalClipPool: string[]) {
   };
 }
 
-// ─── Step manifest ───────────────────────────────────────────────────────────
+// ─── Step manifest ────────────────────────────────────────────────────────────
 export const RENDER_STEPS: RenderStep[] = [
-  { label: "Slicing sections into fast cuts",                    done: false },
-  { label: "Pre-rendering cuts with Ken Burns motion",           done: false },
-  { label: "Merging voiceover audio tracks",                     done: false },
-  { label: "Generating SRT captions",                            done: false },
-  { label: "Chaining cuts with xfade transitions",               done: false },
-  { label: "Mixing audio + burning captions",                    done: false },
-  { label: "Generating thumbnail",                               done: false },
+  { label: "Slicing sections into fast cuts",           done: false },
+  { label: "Pre-rendering cuts with Ken Burns motion",  done: false },
+  { label: "Merging voiceover audio tracks",            done: false },
+  { label: "Generating SRT captions",                   done: false },
+  { label: "Chaining cuts with xfade transitions",      done: false },
+  { label: "Mixing audio + burning captions",           done: false },
+  { label: "Generating thumbnail",                      done: false },
 ];
 
-// ─── Main assembly entry point ───────────────────────────────────────────────
+// ─── Main assembly entry point ────────────────────────────────────────────────
 export async function assemble(
   videoId: string,
   videoTitle: string,
@@ -556,8 +540,6 @@ export async function assemble(
   const total = RENDER_STEPS.length;
 
   // ── Build global clip pool ───────────────────────────────────────────────
-  // Flat list of every unique downloaded clip path across all sections.
-  // Used as a fallback when a section's own clips are exhausted.
   const globalClipPool: string[] = [];
   for (const paths of footagePathsPerSection) {
     if (paths) {
@@ -567,8 +549,10 @@ export async function assemble(
     }
   }
 
-  // getClipsForSection: returns a section's own clips, or borrows from the
-  // global pool at a staggered offset so adjacent sections look different.
+  console.log(`[assembler] global clip pool: ${globalClipPool.length} unique clips`);
+
+  // Returns a section's own clips, or borrows from the global pool at a
+  // staggered offset so adjacent sections that fall back look different.
   const getClipsForSection = (i: number): string[] => {
     const own = footagePathsPerSection[i];
     if (own && own.length > 0) return own;
@@ -583,9 +567,7 @@ export async function assemble(
     return borrowed;
   };
 
-  // Unique clip picker — created once, shared across all sections.
-  // Uses round-robin / max-spacing so clips are spread as far apart as
-  // possible across the whole video, even when cuts >> unique clips.
+  // Shared unique clip picker — max-spacing across the entire video
   const getUniqueClip = makeUniqueClipPicker(globalClipPool);
 
   // ── Step 1: Plan cuts ────────────────────────────────────────────────────
@@ -618,14 +600,8 @@ export async function assemble(
     const sectionCuts: CutInfo[] = [];
 
     for (let ci = 0; ci < cutDurations.length; ci++) {
-      const cutDur = cutDurations[ci];
-
-      // getUniqueClip scores sectionPool first, then falls back to the global
-      // pool — choosing whichever clip appeared least recently across the
-      // entire video render to maximise visual variety.
       const clipPath = getUniqueClip(availableClips);
-
-      sectionCuts.push({ clipPath: clipPath ?? "", durationSec: cutDur });
+      sectionCuts.push({ clipPath: clipPath ?? "", durationSec: cutDurations[ci] });
     }
 
     cutPlan.push(sectionCuts);
@@ -675,13 +651,14 @@ export async function assemble(
       } catch (err) {
         console.error(`[assembler] Ken Burns failed for cut ${i}/${ci}:`, (err as Error).message);
 
+        // Fallback 1: simple scale to intermediate resolution
         const fallbackPath = path.join(tmpDir, `scaled_${i}_${ci}.mp4`);
         try {
           const rawDur = await ffprobe(clipPath);
           const loopArgs = rawDur < durationSec ? ["-stream_loop", "-1"] : [];
           await ffmpeg([
             ...loopArgs, "-i", clipPath,
-            "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
+            "-vf", `scale=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
             "-t", String(durationSec), "-r", String(FPS),
             "-threads", String(THREADS), "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
             "-an", "-y", fallbackPath,
@@ -689,6 +666,7 @@ export async function assemble(
           renderedCuts.push(fallbackPath);
           renderedDurations.push(durationSec);
         } catch {
+          // Fallback 2: black clip
           const blackPath = path.join(tmpDir, `black_${i}_${ci}.mp4`);
           await makeBlackClip(blackPath, durationSec);
           renderedCuts.push(blackPath);
@@ -703,6 +681,8 @@ export async function assemble(
   if (renderedCuts.length === 0) {
     throw new Error("No cuts could be rendered — check that audio was generated.");
   }
+
+  console.log(`[assembler] ${renderedCuts.length} cuts rendered, ${sectionBoundaries.length} section boundaries`);
 
   // ── Step 3: Merge voiceover audio ────────────────────────────────────────
   await onProgress(2, total, RENDER_STEPS[2].label);
@@ -722,10 +702,9 @@ export async function assemble(
   // ── Step 5: Chain all cuts with xfade transitions ────────────────────────
   await onProgress(4, total, RENDER_STEPS[4].label);
   const transitionedVideo = path.join(tmpDir, "transitioned.mp4");
-  console.log(`[assembler] ${renderedCuts.length} cuts, ${sectionBoundaries.length} section boundaries`);
   await chainXfadeTransitions(renderedCuts, renderedDurations, transitionedVideo, sectionBoundaries);
 
-  // ── Step 6: Final mix — audio + BGM + captions ───────────────────────────
+  // ── Step 6: Final mix — upscale + audio + BGM + captions ─────────────────
   await onProgress(5, total, RENDER_STEPS[5].label);
   const finalMp4 = path.join(outputDir, "final.mp4");
 
