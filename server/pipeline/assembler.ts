@@ -15,7 +15,7 @@ const TRANSITION_DURATION = 0.25;
 const BGM_VOLUME = 0.12;
 const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
-const THREADS = 1;
+const THREADS = 0; // FIX: was 1 — 0 = auto-detect cores, enables parallelism
 const CRF = 26;
 const PRESET = "ultrafast";
 const XFADE_BATCH = 2;
@@ -32,35 +32,28 @@ const MOTION_CYCLE: MotionType[] = [
 ];
 
 // ─── Theme system ─────────────────────────────────────────────────────────────
-// gradeFilter applies cinematic color science to every rendered cut.
-// captionAccent is the hex color that "lights up" each word in the karaoke captions.
 interface ThemeConfig {
   gradeFilter: string;
   captionAccent: string;
 }
 
 const THEME_CONFIGS: Record<string, ThemeConfig> = {
-  // Dark, cold, high-contrast — true crime / thriller
   crime: {
     gradeFilter: "eq=contrast=1.22:brightness=-0.05:saturation=0.85,colorchannelmixer=rr=0.93:gg=0.95:bb=1.10",
     captionAccent: "#e53e3e",
   },
-  // Warm, desaturated, vintage — history / documentary
   history: {
     gradeFilter: "eq=contrast=1.08:brightness=0.02:saturation=0.72,colorchannelmixer=rr=1.06:bb=0.88",
     captionAccent: "#c6932a",
   },
-  // Vibrant, high-saturation — tech / business / lifestyle
   modern: {
     gradeFilter: "eq=contrast=1.18:brightness=0.03:saturation=1.45",
     captionAccent: "#6c47ff",
   },
-  // Clean, natural — corporate / educational
   minimalist: {
     gradeFilter: "eq=contrast=1.05:brightness=0.01:saturation=0.95",
     captionAccent: "#4a90d9",
   },
-  // Balanced neutral — anything
   standard: {
     gradeFilter: "eq=contrast=1.12:brightness=0.02:saturation=1.25",
     captionAccent: "#22c55e",
@@ -87,7 +80,6 @@ async function resolveFont(): Promise<string> {
   return "";
 }
 
-// ASS timestamp format h:mm:ss.cc (centiseconds, not milliseconds)
 function assTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -96,7 +88,6 @@ function assTime(seconds: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-// Convert #rrggbb → ASS &HAABBGGRR (big-endian BGRA, alpha 00 = opaque)
 function hexToAss(hex: string, alpha = 0): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -204,20 +195,16 @@ function sliceCuts(audioDuration: number): number[] {
 }
 
 // ─── Karaoke ASS captions ─────────────────────────────────────────────────────
-// vidrush.ai signature: each word lights up in the theme accent color as it is spoken.
-// Secondary (upcoming) = dim grey, Primary (current+past) = accent color.
-// Word timing is estimated proportionally from character count since edge-tts
-// doesn't return per-word timestamps.
 async function generateAssKaraoke(
   sections: ScriptSection[],
   audioPaths: (string | null)[],
   assPath: string,
-  accentHex: string       // e.g. "#e53e3e" for crime theme
+  accentHex: string
 ): Promise<void> {
-  const primaryColor   = hexToAss(accentHex);       // highlighted (current + past)
-  const secondaryColor = "&H00AAAAAA";               // upcoming words, grey
-  const outlineColor   = "&H00000000";               // black outline
-  const backColor      = "&HAA000000";               // semi-dark bg box
+  const primaryColor   = hexToAss(accentHex);
+  const secondaryColor = "&H00AAAAAA";
+  const outlineColor   = "&H00000000";
+  const backColor      = "&HAA000000";
 
   const WORDS_PER_LINE = 4;
   let events = "";
@@ -232,8 +219,6 @@ async function generateAssKaraoke(
     if (duration <= 0) continue;
 
     const words = section.narration.trim().split(/\s+/);
-
-    // Distribute section duration across words proportional to char length
     const charCounts = words.map(w => Math.max(w.length, 1));
     const totalChars = charCounts.reduce((a, b) => a + b, 0);
     const wordDurs = charCounts.map(c => (c / totalChars) * duration);
@@ -248,7 +233,6 @@ async function generateAssKaraoke(
       const lineStart = timeOffset + wordTimeAcc;
       const lineEnd = lineStart + chunkDur;
 
-      // \kN = duration in centiseconds for this syllable
       const kText = chunk.map((word, wi) => {
         const cs = Math.max(Math.round(chunkDurs[wi] * 100), 1);
         return `{\\k${cs}}${word}`;
@@ -291,12 +275,8 @@ function buildOverlayFilters(
 ): string[] {
   const filters: string[] = [];
   const ff = font ? `fontfile='${font}':` : "";
-
-  // Derive a hex accent color without '#' for FFmpeg drawbox color spec
-  // drawbox uses 0xRRGGBB, drawtext uses HTML-style or named colors
   const accentRGB = `0x${accentHex.slice(1)}`;
 
-  // ── Title card (0 → 3.5 s) ──────────────────────────────────────────────
   if (videoTitle.trim()) {
     const titleLine = escapeDrawtext(wrapText(videoTitle, 38)[0] ?? videoTitle.slice(0, 60));
     const alpha = `if(lt(t\\,0.5)\\,t/0.5\\,if(gt(t\\,3.0)\\,(3.5-t)/0.5\\,1))`;
@@ -307,14 +287,12 @@ function buildOverlayFilters(
       `borderw=2:bordercolor=black@0.9:` +
       `alpha='${alpha}':enable='between(t\\,0\\,3.5)'`
     );
-    // Thin accent bar below title
     filters.push(
       `drawbox=x=(iw-600)/2:y=ih/2+4:w=600:h=4:color=${accentRGB}:t=fill:` +
       `enable='between(t\\,0.4\\,3.5)'`
     );
   }
 
-  // ── Stat overlays (stat sections with key_point) ─────────────────────────
   for (const t of sectionTimings) {
     if (t.sectionType !== "stat" || !t.keyPoint) continue;
     const dur = t.endSec - t.startSec;
@@ -327,7 +305,6 @@ function buildOverlayFilters(
     const lines = wrapText(t.keyPoint, 34).slice(0, 2);
     const alpha = `if(lt(t\\,${(showStart + 0.3).toFixed(2)})\\,(t-${showStart.toFixed(2)})/0.3\\,if(gt(t\\,${(showEnd - 0.3).toFixed(2)})\\,(${showEnd.toFixed(2)}-t)/0.3\\,1))`;
 
-    // Background box
     const boxH = lines.length * 72 + 44;
     const boxW = 900;
     const boxX = (OUTPUT_WIDTH - boxW) / 2;
@@ -336,7 +313,6 @@ function buildOverlayFilters(
       `drawbox=x=${boxX.toFixed(0)}:y=${boxY.toFixed(0)}:w=${boxW}:h=${boxH}:color=0x000000CC:t=fill:` +
       `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
     );
-    // Accent top-border bar
     filters.push(
       `drawbox=x=${boxX.toFixed(0)}:y=${boxY.toFixed(0)}:w=${boxW}:h=5:color=${accentRGB}:t=fill:` +
       `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
@@ -354,7 +330,6 @@ function buildOverlayFilters(
     });
   }
 
-  // ── Chapter lower-thirds for intro / outro ─────────────────────────────
   for (const t of sectionTimings) {
     if (t.sectionType !== "intro" && t.sectionType !== "outro") continue;
     const isIntro = t.sectionType === "intro";
@@ -365,7 +340,6 @@ function buildOverlayFilters(
     const label = escapeDrawtext(isIntro ? "Introduction" : "Conclusion");
     const alpha = `if(lt(t\\,${(showStart + 0.4).toFixed(2)})\\,(t-${showStart.toFixed(2)})/0.4\\,if(gt(t\\,${(showEnd - 0.4).toFixed(2)})\\,(${showEnd.toFixed(2)}-t)/0.4\\,1))`;
 
-    // Accent-colored pill
     filters.push(
       `drawbox=x=72:y=${OUTPUT_HEIGHT - 138}:w=240:h=44:color=${accentRGB}CC:t=fill:` +
       `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
@@ -475,22 +449,17 @@ async function mergeAudio(audioPaths: string[], outputPath: string): Promise<voi
   await ffmpeg([...inputs, "-filter_complex", fc, "-map", "[a]", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-y", outputPath]);
 }
 
-// ─── Final mix: upscale 720→1080, karaoke ASS, drawtext overlays, BGM ─────────
-async function finalMixWithCaptions(
+// ─── Pass 1: upscale + burn ASS captions only ────────────────────────────────
+// FIX: Split final mix into two passes so the filter chain per-pass is shorter,
+// avoiding the 600s timeout on Railway's throttled free-plan CPUs.
+async function upscaleAndBurnCaptions(
   videoPath: string,
-  voiceoverPath: string,
-  bgmPath: string | null,
   assPath: string | null,
   outputPath: string,
-  videoTitle: string,
-  sectionTimings: SectionTiming[],
-  accentHex: string
 ): Promise<void> {
-  const font = await resolveFont();
+  // FIX: bicubic instead of lanczos — nearly identical quality, much faster
+  const upscale = `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=bicubic`;
 
-  const upscale = `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos`;
-
-  // ASS karaoke captions via `ass=` filter (requires libass, same as subtitles)
   let captionFilter = "";
   if (assPath) {
     try {
@@ -501,22 +470,44 @@ async function finalMixWithCaptions(
         captionFilter = `ass='${escaped}'`;
       }
     } catch {
-      console.warn("[assembler] ASS file missing, skipping captions");
+      console.warn("[assembler] ASS file missing, skipping captions in pass 1");
     }
   }
 
+  const vfParts = [upscale];
+  if (captionFilter) vfParts.push(captionFilter);
+
+  console.log(`[assembler] pass 1: upscale 720→1080 (bicubic) + karaoke=${!!captionFilter}`);
+
+  // FIX: THREADS=0 (auto), ultrafast preset, same CRF as intermediate cuts
+  await ffmpeg([
+    "-i", videoPath,
+    "-vf", vfParts.join(","),
+    "-threads", "0",
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-an", "-y", outputPath,
+  ]);
+}
+
+// ─── Pass 2: drawtext overlays + audio mix ────────────────────────────────────
+async function overlayAndMixAudio(
+  videoPath: string,
+  voiceoverPath: string,
+  bgmPath: string | null,
+  outputPath: string,
+  videoTitle: string,
+  sectionTimings: SectionTiming[],
+  accentHex: string,
+): Promise<void> {
+  const font = await resolveFont();
   const overlayFilters = buildOverlayFilters(videoTitle, sectionTimings, accentHex, font);
 
-  // Chain: upscale → captions → drawtext overlays
-  const vfParts: string[] = [upscale];
-  if (captionFilter) vfParts.push(captionFilter);
-  vfParts.push(...overlayFilters);
-  const videoFilter = vfParts.join(",");
+  console.log(`[assembler] pass 2: overlays=${overlayFilters.length}, theme accent=${accentHex}, bgm=${!!bgmPath}`);
 
-  console.log(`[assembler] final mix: karaoke=${!!captionFilter}, overlays=${overlayFilters.length}, theme accent=${accentHex}`);
-
-  const videoArgs = ["-vf", videoFilter];
-  const encodeArgs = ["-threads", String(THREADS), "-c:v", "libx264", "-crf", "23", "-preset", "veryfast"];
+  // FIX: THREADS=0, ultrafast — overlay pass is CPU-heavy enough without extra pressure
+  const encodeArgs = ["-threads", "0", "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET];
+  const videoFilter = overlayFilters.length > 0 ? overlayFilters.join(",") : "copy";
+  const videoArgs = overlayFilters.length > 0 ? ["-vf", videoFilter] : [];
 
   if (bgmPath) {
     const voDur = await ffprobe(voiceoverPath);
@@ -543,6 +534,33 @@ async function finalMixWithCaptions(
   }
 }
 
+// ─── Final mix: two-pass (was single monolithic pass) ────────────────────────
+async function finalMixWithCaptions(
+  videoPath: string,
+  voiceoverPath: string,
+  bgmPath: string | null,
+  assPath: string | null,
+  outputPath: string,
+  videoTitle: string,
+  sectionTimings: SectionTiming[],
+  accentHex: string
+): Promise<void> {
+  const tmpDir = path.dirname(videoPath);
+  const pass1Out = path.join(tmpDir, "pass1_captioned.mp4");
+
+  // Pass 1: upscale 720→1080 + burn ASS captions
+  await upscaleAndBurnCaptions(videoPath, assPath, pass1Out);
+
+  // Pass 2: drawtext/drawbox overlays + audio mix → final output
+  await overlayAndMixAudio(
+    pass1Out, voiceoverPath, bgmPath,
+    outputPath, videoTitle, sectionTimings, accentHex
+  );
+
+  // Clean up pass 1 intermediate
+  await fs.unlink(pass1Out).catch(() => {});
+}
+
 // ─── Thumbnail ────────────────────────────────────────────────────────────────
 async function extractThumbnail(videoPath: string, thumbPath: string): Promise<void> {
   await ffmpeg([
@@ -561,15 +579,11 @@ async function makeBlackClip(outPath: string, durationSec: number): Promise<void
 }
 
 // ─── Per-section clip resolver ────────────────────────────────────────────────
-// Each section should ONLY use its own downloaded footage (cycled), so that
-// the visuals always match the narration for that section.
-// Fallback order: own clips → nearest adjacent section → global pool slice.
 function makeSectionClipResolver(footagePathsPerSection: (string[] | null)[], globalPool: string[]) {
   return (i: number): string[] => {
     const own = footagePathsPerSection[i];
     if (own && own.length > 0) return own;
 
-    // Adjacent sections first (thematically closest)
     for (let radius = 1; radius <= 3; radius++) {
       for (const j of [i - radius, i + radius]) {
         if (j >= 0 && j < footagePathsPerSection.length) {
@@ -579,7 +593,6 @@ function makeSectionClipResolver(footagePathsPerSection: (string[] | null)[], gl
       }
     }
 
-    // Last resort: a section-specific window of the global pool
     if (globalPool.length === 0) return [];
     const offset = (i * 4) % globalPool.length;
     const N = Math.min(6, globalPool.length);
@@ -619,18 +632,15 @@ export async function assemble(
 
   const total = RENDER_STEPS.length;
 
-  // ── Global clip pool ─────────────────────────────────────────────────────
   const globalPool: string[] = [];
   for (const paths of footagePathsPerSection) {
     if (paths) for (const p of paths) if (!globalPool.includes(p)) globalPool.push(p);
   }
   console.log(`[assembler] global clip pool: ${globalPool.length} unique clips`);
 
-  // Clips for each section come ONLY from that section's own footage (cycled).
-  // This ensures visuals always match the narration for the section being spoken.
   const getSectionClips = makeSectionClipResolver(footagePathsPerSection, globalPool);
 
-  // ── Step 1: Plan cuts + compute section timings for overlays ─────────────
+  // ── Step 1: Plan cuts ────────────────────────────────────────────────────
   await onProgress(0, total, RENDER_STEPS[0].label);
 
   type CutInfo = { clipPath: string; durationSec: number };
@@ -653,7 +663,6 @@ export async function assemble(
     const cuts = sliceCuts(dur);
     const sectionClips = getSectionClips(i);
 
-    // Cycle through the section's own clips so every cut stays on-topic
     cutPlan.push(cuts.map((d, ci) => ({
       clipPath: sectionClips.length > 0 ? sectionClips[ci % sectionClips.length] : "",
       durationSec: d,
@@ -663,7 +672,7 @@ export async function assemble(
 
   console.log(`[assembler] ${sections.length} sections → ${cutPlan.reduce((s, c) => s + c.length, 0)} cuts, total ${runningTime.toFixed(1)}s`);
 
-  // ── Step 2: Pre-render cuts with Ken Burns + theme grade ─────────────────
+  // ── Step 2: Pre-render cuts ──────────────────────────────────────────────
   await onProgress(1, total, RENDER_STEPS[1].label);
 
   const renderedCuts: string[] = [];
@@ -698,7 +707,6 @@ export async function assemble(
         renderedDurs.push(durationSec);
       } catch (err) {
         console.error(`[assembler] Ken Burns failed ${i}/${ci}:`, (err as Error).message);
-        // Fallback: simple scale
         const fp = path.join(tmpDir, `scaled_${i}_${ci}.mp4`);
         try {
           const raw = await ffprobe(clipPath);
@@ -749,7 +757,7 @@ export async function assemble(
   const transitioned = path.join(tmpDir, "transitioned.mp4");
   await chainXfadeTransitions(renderedCuts, renderedDurs, transitioned, sectionBounds);
 
-  // ── Step 6: Final mix ────────────────────────────────────────────────────
+  // ── Step 6: Final mix (two-pass) ─────────────────────────────────────────
   await onProgress(5, total, RENDER_STEPS[5].label);
   const finalMp4 = path.join(outputDir, "final.mp4");
   await finalMixWithCaptions(
