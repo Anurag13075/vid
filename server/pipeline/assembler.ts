@@ -15,7 +15,7 @@ const TRANSITION_DURATION = 0.25;
 const BGM_VOLUME = 0.12;
 const BGM_FADE_IN = 1.0;
 const BGM_FADE_OUT = 2.0;
-const THREADS = 0; // FIX: was 1 — 0 = auto-detect cores, enables parallelism
+const THREADS = 0; // 0 = auto-detect cores
 const CRF = 26;
 const PRESET = "ultrafast";
 const XFADE_BATCH = 2;
@@ -39,11 +39,13 @@ interface ThemeConfig {
 
 const THEME_CONFIGS: Record<string, ThemeConfig> = {
   crime: {
-    gradeFilter: "eq=contrast=1.22:brightness=-0.05:saturation=0.85,colorchannelmixer=rr=0.93:gg=0.95:bb=1.10",
+    // FIX: removed colorchannelmixer — it silently promotes to yuv444p on some FFmpeg builds
+    // Use hue/curves instead which stay in yuv420p
+    gradeFilter: "eq=contrast=1.22:brightness=-0.05:saturation=0.85,hue=s=0.85",
     captionAccent: "#e53e3e",
   },
   history: {
-    gradeFilter: "eq=contrast=1.08:brightness=0.02:saturation=0.72,colorchannelmixer=rr=1.06:bb=0.88",
+    gradeFilter: "eq=contrast=1.08:brightness=0.02:saturation=0.72,hue=h=10:s=0.9",
     captionAccent: "#c6932a",
   },
   modern: {
@@ -164,6 +166,11 @@ async function renderCut(
 ): Promise<void> {
   const clipDuration = await ffprobe(clipPath);
   const needsLoop = clipDuration < durationSec;
+
+  // FIX: always end with format=yuv420p so cuts never end up as yuv444p.
+  // colorchannelmixer (used in old crime/history themes) promotes to 444p —
+  // we've removed it from THEME_CONFIGS above, but the explicit format= here
+  // is a belt-and-suspenders guard regardless of grade filter content.
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)},${gradeFilter},format=yuv420p`;
 
   console.log(`[assembler] cut (${motionType}) ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
@@ -174,7 +181,9 @@ async function renderCut(
     "-vf", fullFilter,
     "-t", String(durationSec),
     "-r", String(FPS),
-    "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-threads", String(THREADS),
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-pix_fmt", "yuv420p", // FIX: explicit encoder-level pixel format
     "-an", "-y", outPath,
   ]);
 }
@@ -392,6 +401,7 @@ async function xfadeSmallBatch(
     "-filter_complex", fg.slice(0, -1),
     "-map", "[vout]",
     "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-pix_fmt", "yuv420p", // FIX: ensure xfade output stays 420p
     "-r", String(FPS), "-an", "-y", outputPath,
   ]);
 }
@@ -450,14 +460,11 @@ async function mergeAudio(audioPaths: string[], outputPath: string): Promise<voi
 }
 
 // ─── Pass 1: upscale + burn ASS captions only ────────────────────────────────
-// FIX: Split final mix into two passes so the filter chain per-pass is shorter,
-// avoiding the 600s timeout on Railway's throttled free-plan CPUs.
 async function upscaleAndBurnCaptions(
   videoPath: string,
   assPath: string | null,
   outputPath: string,
 ): Promise<void> {
-  // FIX: bicubic instead of lanczos — nearly identical quality, much faster
   const upscale = `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=bicubic`;
 
   let captionFilter = "";
@@ -474,17 +481,22 @@ async function upscaleAndBurnCaptions(
     }
   }
 
-  const vfParts = [upscale];
+  // FIX: force yuv420p BEFORE the ass filter.
+  // The ass subtitle filter requires yuv420p — feeding it yuv444p (which
+  // colorchannelmixer or some source clips can produce) causes libx264 to
+  // select "High 4:4:4 Predictive" profile, ballooning RAM usage and
+  // triggering an OOM kill (exit code null) on Railway free plan.
+  const vfParts = [upscale, "format=yuv420p"];
   if (captionFilter) vfParts.push(captionFilter);
 
   console.log(`[assembler] pass 1: upscale 720→1080 (bicubic) + karaoke=${!!captionFilter}`);
 
-  // FIX: THREADS=0 (auto), ultrafast preset, same CRF as intermediate cuts
   await ffmpeg([
     "-i", videoPath,
     "-vf", vfParts.join(","),
     "-threads", "0",
     "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-pix_fmt", "yuv420p", // FIX: belt-and-suspenders at encoder level
     "-an", "-y", outputPath,
   ]);
 }
@@ -504,8 +516,11 @@ async function overlayAndMixAudio(
 
   console.log(`[assembler] pass 2: overlays=${overlayFilters.length}, theme accent=${accentHex}, bgm=${!!bgmPath}`);
 
-  // FIX: THREADS=0, ultrafast — overlay pass is CPU-heavy enough without extra pressure
-  const encodeArgs = ["-threads", "0", "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET];
+  const encodeArgs = [
+    "-threads", "0",
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-pix_fmt", "yuv420p", // FIX: keep 420p through final pass too
+  ];
   const videoFilter = overlayFilters.length > 0 ? overlayFilters.join(",") : "copy";
   const videoArgs = overlayFilters.length > 0 ? ["-vf", videoFilter] : [];
 
@@ -534,7 +549,7 @@ async function overlayAndMixAudio(
   }
 }
 
-// ─── Final mix: two-pass (was single monolithic pass) ────────────────────────
+// ─── Final mix: two-pass ─────────────────────────────────────────────────────
 async function finalMixWithCaptions(
   videoPath: string,
   voiceoverPath: string,
@@ -548,7 +563,7 @@ async function finalMixWithCaptions(
   const tmpDir = path.dirname(videoPath);
   const pass1Out = path.join(tmpDir, "pass1_captioned.mp4");
 
-  // Pass 1: upscale 720→1080 + burn ASS captions
+  // Pass 1: upscale 720→1080 + burn ASS captions (yuv420p enforced)
   await upscaleAndBurnCaptions(videoPath, assPath, pass1Out);
 
   // Pass 2: drawtext/drawbox overlays + audio mix → final output
@@ -573,7 +588,9 @@ async function extractThumbnail(videoPath: string, thumbPath: string): Promise<v
 async function makeBlackClip(outPath: string, durationSec: number): Promise<void> {
   await ffmpeg([
     "-f", "lavfi", "-i", `color=c=black:size=${INTERMEDIATE_WIDTH}x${INTERMEDIATE_HEIGHT}:rate=${FPS}`,
-    "-t", String(durationSec), "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+    "-t", String(durationSec),
+    "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+    "-pix_fmt", "yuv420p", // FIX: black clips must also be 420p
     "-an", "-y", outPath,
   ]);
 }
@@ -716,6 +733,7 @@ export async function assemble(
             "-vf", `scale=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
             "-t", String(durationSec), "-r", String(FPS),
             "-threads", String(THREADS), "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", // FIX: fallback path also needs 420p
             "-an", "-y", fp,
           ]);
           renderedCuts.push(fp);
