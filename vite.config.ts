@@ -10,7 +10,11 @@ export default defineConfig({
     TanStackRouterVite(),
     react(),
     tailwindcss(),
+
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
+
+    tsConfigPaths({ ignoreConfigErrors: true }),
+
   ],
   resolve: {
     alias: {
@@ -28,6 +32,14 @@ export default defineConfig({
     proxy: {
       "/api": { target: "http://localhost:3001", changeOrigin: true },
       "/videos": { target: "http://localhost:3001", changeOrigin: true },
+    },
+    watch: {
+      ignored: [
+        "**/.cache/**",
+        "**/node_modules/**",
+        "**/data/**",
+        "**/.git/**",
+      ],
     },
   },
 });

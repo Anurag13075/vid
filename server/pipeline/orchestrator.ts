@@ -3,7 +3,7 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover } from "./voiceover.js";
-import { findMultipleFootage, downloadClip, createClipTracker } from "./footageAgent.js";
+import { createClipTracker, findMultipleFootage, downloadClip } from "./footageAgent.js";
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
 
@@ -52,7 +52,18 @@ async function runPipeline(videoId: string) {
   const video = await getVideo(videoId);
   if (!video) return;
 
-  const { title, voice, length } = video;
+  const { title, voice, length, theme } = video;
+
+  // Clean up leftover temp dirs from previous runs
+  const vidrushTmp = path.join("/tmp/vidrush");
+  try {
+    const existing = await fs.readdir(vidrushTmp).catch(() => []);
+    for (const dir of existing) {
+      if (dir !== videoId) {
+        fs.rm(path.join(vidrushTmp, dir), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  } catch {}
 
   try {
     // ── Phase 1: Script generation ──────────────────────────────────────
@@ -67,7 +78,7 @@ async function runPipeline(videoId: string) {
     await emit(videoId, {
       stage: "writing" as Stage,
       progress: 15,
-      message: "Generating script with Claude AI...",
+      message: "Generating script...",
     });
 
     const script = await withRetry(() => generateScript(title, length));
@@ -83,7 +94,7 @@ async function runPipeline(videoId: string) {
     await emit(videoId, {
       stage: "voiceover" as Stage,
       progress: 32,
-      message: `Generating voiceover with MiniMax TTS...`,
+      message: `Generating voiceover...`,
       script,
     });
 
@@ -117,79 +128,124 @@ async function runPipeline(videoId: string) {
     }
 
     // ── Phase 3: Footage search ─────────────────────────────────────────
-    // FIX: create a per-job usedIds tracker instead of calling resetUsedClips()
-    // (module-level state leaked across concurrent jobs in the old design)
     const usedIds = createClipTracker();
 
     const clips: Clip[] = script.sections.map((s) => ({
       id: s.id,
-      keyword: s.visual_keywords.join(" · ") || "cinematic background",
+      // Show the first keyword in the UI so user can see what's being searched
+      keyword: s.visual_keywords[0] || title.toLowerCase().slice(0, 40),
       thumbUrl: "",
       videoUrl: "",
       source: "pexels" as const,
       externalId: "",
       duration: 10,
-      status: "pending" as const,
+      status: (s.section_type === "graphic" || !s.narration.trim())
+        ? "skipped" as const
+        : "pending" as const,
     }));
 
     await emit(videoId, {
       stage: "footage" as Stage,
       progress: 50,
-      message: "Searching Pexels & Pixabay for matching footage...",
+      message: "Searching for matching footage...",
       script,
       clips,
     });
 
-    // footagePathsPerSection: up to 3 diverse clips per section for 3-4s cuts
-    const footagePathsPerSection: (string[] | null)[] = [];
+    const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
 
-    for (let i = 0; i < script.sections.length; i++) {
-      const section = script.sections[i];
-      const pct = 50 + Math.round((i / script.sections.length) * 18);
+    const SECTION_HARD_CAP_MS = 35_000;
+    const BATCH_SIZE = 2;
 
-      // Skip sections with no audio (graphic transition sections)
-      if (!audioPaths[i]) {
-        footagePathsPerSection.push(null);
-        continue;
-      }
+    for (let batchStart = 0; batchStart < script.sections.length; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, script.sections.length);
+      const batchIndices = Array.from(
+        { length: batchEnd - batchStart },
+        (_, k) => batchStart + k
+      );
 
-      clips[i] = { ...clips[i], status: "downloading" };
+      await Promise.all(
+        batchIndices.map(async (i) => {
+          const section = script.sections[i];
+
+          if (section.section_type === "graphic" || !section.narration.trim() || !audioPaths[i]) {
+            footagePathsPerSection[i] = null;
+            return;
+          }
+
+          clips[i] = { ...clips[i], status: "downloading" };
+
+          const readyCountPre = clips.filter((c) => c.status === "ready").length;
+          const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
+          const pctPre = 50 + Math.round((i / script.sections.length) * 18);
+
+          await emit(videoId, {
+            stage: "footage" as Stage,
+            progress: pctPre,
+            message: `Finding clips for section ${i + 1}/${script.sections.length} (${readyCountPre}/${totalSearchable} ready)`,
+            script,
+            clips: [...clips],
+          });
+
+          const sectionWork = async () => {
+            try {
+              // Pass title so footage fallback stays on-topic with user's prompt
+              const foundClips = await findMultipleFootage(section, 12, videoId, usedIds, title);
+
+              if (foundClips.length > 0) {
+                const downloadedPaths: string[] = [];
+                for (let ci = 0; ci < foundClips.length; ci++) {
+                  try {
+                    const p = await downloadClip(foundClips[ci], videoId, `${section.id}_${ci}`);
+                    downloadedPaths.push(p);
+                  } catch (dlErr) {
+                    console.warn(`Section ${section.id} clip ${ci} download failed:`, (dlErr as Error).message);
+                  }
+                }
+
+                if (downloadedPaths.length > 0) {
+                  clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
+                  footagePathsPerSection[i] = downloadedPaths;
+                } else {
+                  clips[i] = { ...clips[i], status: "failed" };
+                  footagePathsPerSection[i] = null;
+                }
+              } else {
+                clips[i] = { ...clips[i], status: "failed" };
+                footagePathsPerSection[i] = null;
+              }
+            } catch (err) {
+              console.error(`Footage failed for section ${section.id}:`, err);
+              clips[i] = { ...clips[i], status: "failed" };
+              footagePathsPerSection[i] = null;
+            }
+          };
+
+          let hardTimeoutId: ReturnType<typeof setTimeout>;
+          const hardTimeout = new Promise<void>((resolve) => {
+            hardTimeoutId = setTimeout(() => {
+              console.warn(`Section ${section.id} timed out after ${SECTION_HARD_CAP_MS}ms — skipping`);
+              clips[i] = { ...clips[i], status: "failed" };
+              footagePathsPerSection[i] = null;
+              resolve();
+            }, SECTION_HARD_CAP_MS);
+          });
+
+          await Promise.race([
+            sectionWork().then(() => clearTimeout(hardTimeoutId!)),
+            hardTimeout,
+          ]);
+        })
+      );
+
+      const readyCount = clips.filter((c) => c.status === "ready").length;
+      const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
+      const pct = 50 + Math.round((batchEnd / script.sections.length) * 18);
+
       await emit(videoId, {
         stage: "footage" as Stage,
         progress: pct,
-        message: `Finding clips for: "${section.visual_keywords[0]}"`,
-        script,
-        clips: [...clips],
-      });
-
-      try {
-        // FIX: pass usedIds so each section gets unique clips within this job
-        const foundClips = await findMultipleFootage(section, 3, videoId, usedIds);
-
-        if (foundClips.length > 0) {
-          // Download all clips in parallel for speed
-          const downloadedPaths = await Promise.all(
-            foundClips.map((clip, ci) =>
-              downloadClip(clip, videoId, `${section.id}_${ci}`)
-            )
-          );
-          // Use first clip for UI display
-          clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
-          footagePathsPerSection.push(downloadedPaths);
-        } else {
-          clips[i] = { ...clips[i], status: "failed" };
-          footagePathsPerSection.push(null);
-        }
-      } catch (err) {
-        console.error(`Footage failed for section ${section.id}:`, err);
-        clips[i] = { ...clips[i], status: "failed" };
-        footagePathsPerSection.push(null);
-      }
-
-      await emit(videoId, {
-        stage: "footage" as Stage,
-        progress: pct,
-        message: `${clips.filter((c) => c.status === "ready").length} sections ready`,
+        message: `${readyCount}/${totalSearchable} clips ready`,
         script,
         clips: [...clips],
       });
@@ -211,7 +267,6 @@ async function runPipeline(videoId: string) {
     await fs.mkdir(outputDir, { recursive: true });
 
     const bgmPath = await findBgm(script.mood);
-
     const validAudioPaths: (string | null)[] = script.sections.map((_, i) => audioPaths[i] || null);
 
     const { videoPath, thumbPath } = await assemble(
@@ -241,7 +296,8 @@ async function runPipeline(videoId: string) {
           renderSteps: updatedSteps,
           renderProgress: renderPct,
         });
-      }
+      },
+      theme
     );
 
     // ── Phase 5: Done ───────────────────────────────────────────────────
@@ -262,9 +318,9 @@ async function runPipeline(videoId: string) {
 
     console.log(`✅ Video ${videoId} complete: ${videoPath}`);
 
-    // Clean up temp working directory to keep /tmp lean
     const tmpDir = path.join("/tmp/vidrush", videoId);
     fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`Pipeline failed for ${videoId}:`, err);
@@ -289,9 +345,7 @@ async function findBgm(mood: string): Promise<string | null> {
         const pick = mp3s[Math.floor(Math.random() * mp3s.length)];
         return path.join(dir, pick);
       }
-    } catch {
-      // directory doesn't exist
-    }
+    } catch {}
   }
   return null;
 }

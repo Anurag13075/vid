@@ -1,4 +1,4 @@
 import type { ScriptSection, Clip } from "./types.js";
-export declare function resetUsedClips(): void;
-export declare function findFootage(section: ScriptSection, videoId: string): Promise<Clip | null>;
-export declare function downloadClip(clip: Clip, videoId: string, sectionId: number): Promise<string>;
+export declare function createClipTracker(): Set<string>;
+export declare function findMultipleFootage(section: ScriptSection, limit: number, videoId: string, usedIds: Set<string>): Promise<Clip[]>;
+export declare function downloadClip(clip: Clip, videoId: string, suffix: string): Promise<string>;

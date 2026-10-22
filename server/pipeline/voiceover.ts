@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import type { ScriptSection } from "./types.js";
+import { ffmpeg, ffprobe } from "./ffmpeg.js";
 
 // ─── Voice catalogue ────────────────────────────────────────────────────────
 // NOTE: Labels / IDs are kept identical to the original MiniMax list so that
@@ -169,42 +170,19 @@ function estimateDuration(text: string): number {
 
 async function generateSilence(outputPath: string, durationMs: number): Promise<void> {
   const sec = Math.max(durationMs / 1000, 0.5);
-  return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", [
-      "-f", "lavfi",
-      "-i", "anullsrc=r=44100:cl=stereo",
-      "-t", String(sec),
-      "-q:a", "9",
-      "-acodec", "libmp3lame",
-      "-y", outputPath,
-    ], { stdio: "ignore" });
-    proc.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`silence gen failed: ${code}`))
-    );
-    proc.on("error", reject);
-  });
+  await ffmpeg([
+    "-f", "lavfi",
+    "-i", "anullsrc=r=44100:cl=stereo",
+    "-t", String(sec),
+    "-q:a", "9",
+    "-acodec", "libmp3lame",
+    "-y", outputPath,
+  ]);
 }
 
 async function getAudioDurationMs(filePath: string): Promise<number> {
-  return new Promise((resolve) => {
-    const proc = spawn("ffprobe", [
-      "-v", "error",
-      "-show_entries", "format=duration",
-      "-of", "default=noprint_wrappers=1:nokey=1",
-      filePath,
-    ]);
-    let out = "";
-    proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    proc.on("close", (code) => {
-      if (code === 0) {
-        const sec = parseFloat(out.trim());
-        resolve(isNaN(sec) ? 5000 : Math.round(sec * 1000));
-      } else {
-        resolve(5000);
-      }
-    });
-    proc.on("error", () => resolve(5000));
-  });
+  const seconds = await ffprobe(filePath);
+  return Math.round(seconds * 1000) || 5000;
 }
 
 function sleep(ms: number): Promise<void> {

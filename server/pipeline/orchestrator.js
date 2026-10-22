@@ -3,10 +3,9 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover } from "./voiceover.js";
-import { findFootage, downloadClip, resetUsedClips } from "./footageAgent.js";
+import { createClipTracker, findMultipleFootage, downloadClip } from "./footageAgent.js";
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./queue.js";
 async function emit(videoId, event) {
@@ -49,6 +48,17 @@ async function runPipeline(videoId) {
     if (!video)
         return;
     const { title, voice, length } = video;
+    // Clean up any leftover temp dirs from previous runs to keep /tmp lean
+    const vidrushTmp = path.join("/tmp/vidrush");
+    try {
+        const existing = await fs.readdir(vidrushTmp).catch(() => []);
+        for (const dir of existing) {
+            if (dir !== videoId) {
+                fs.rm(path.join(vidrushTmp, dir), { recursive: true, force: true }).catch(() => { });
+            }
+        }
+    }
+    catch { }
     try {
         // ── Phase 1: Script generation ──────────────────────────────────────
         await emit(videoId, {
@@ -70,7 +80,6 @@ async function runPipeline(videoId) {
             script,
         });
         // ── Phase 2: Voiceover ──────────────────────────────────────────────
-        const narrationSections = script.sections.filter((s) => s.section_type !== "graphic");
         await emit(videoId, {
             stage: "voiceover",
             progress: 32,
@@ -103,61 +112,131 @@ async function runPipeline(videoId) {
             }
         }
         // ── Phase 3: Footage search ─────────────────────────────────────────
-        resetUsedClips();
+        // FIX: create a per-job usedIds tracker instead of calling resetUsedClips()
+        // (module-level state leaked across concurrent jobs in the old design)
+        const usedIds = createClipTracker();
+        // Pre-initialize: graphic/empty sections are skipped immediately
         const clips = script.sections.map((s) => ({
             id: s.id,
-            keyword: s.visual_keywords.join(" · ") || "cinematic background",
+            keyword: s.visual_keywords[0] || "cinematic background", // first keyword only
             thumbUrl: "",
             videoUrl: "",
             source: "pexels",
             externalId: "",
             duration: 10,
-            status: "pending",
+            status: (s.section_type === "graphic" || !s.narration.trim())
+                ? "skipped"
+                : "pending",
         }));
         await emit(videoId, {
             stage: "footage",
             progress: 50,
-            message: "Searching Pexels & Pixabay for matching footage...",
+            message: "Searching for matching footage...",
             script,
             clips,
         });
-        const footagePaths = [];
-        for (let i = 0; i < script.sections.length; i++) {
-            const section = script.sections[i];
-            const pct = 50 + Math.round((i / script.sections.length) * 18);
-            clips[i] = { ...clips[i], status: "downloading" };
+        // Pre-initialize results array
+        const footagePathsPerSection = new Array(script.sections.length).fill(null);
+        // Hard cap per section: search (~10s) + 1 SD download (~20s max) = ~30s
+        const SECTION_HARD_CAP_MS = 35_000;
+        // Process in parallel batches of 2 to limit concurrent network pressure
+        const BATCH_SIZE = 2;
+        for (let batchStart = 0; batchStart < script.sections.length; batchStart += BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + BATCH_SIZE, script.sections.length);
+            const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, k) => batchStart + k);
+            await Promise.all(batchIndices.map(async (i) => {
+                const section = script.sections[i];
+                // Skip graphic sections and sections with no audio
+                if (section.section_type === "graphic" || !section.narration.trim() || !audioPaths[i]) {
+                    footagePathsPerSection[i] = null;
+                    // status already "skipped" from initialization
+                    return;
+                }
+                clips[i] = { ...clips[i], status: "downloading" };
+                // Emit per-section start so UI reflects current activity immediately
+                const readyCountPre = clips.filter((c) => c.status === "ready").length;
+                const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
+                const pctPre = 50 + Math.round((i / script.sections.length) * 18);
+                await emit(videoId, {
+                    stage: "footage",
+                    progress: pctPre,
+                    message: `Finding clips for section ${i + 1}/${script.sections.length} (${readyCountPre}/${totalSearchable} ready)`,
+                    script,
+                    clips: [...clips],
+                });
+                // Wrap entire search+download in a hard cap to prevent any single
+                // slow/hanging section from stalling the whole pipeline
+                const sectionWork = async () => {
+                    try {
+                        // 1 clip per section — search is instant, 1 download fits in the cap.
+                        // The assembler's global pool fills any sections that fail with
+                        // borrowed clips at staggered offsets for visual variety.
+                        const foundClips = await findMultipleFootage(section, 6, videoId, usedIds);
+                        if (foundClips.length > 0) {
+                            const downloadedPaths = [];
+                            for (let ci = 0; ci < foundClips.length; ci++) {
+                                try {
+                                    const p = await downloadClip(foundClips[ci], videoId, `${section.id}_${ci}`);
+                                    downloadedPaths.push(p);
+                                }
+                                catch (dlErr) {
+                                    console.warn(`Section ${section.id} clip ${ci} download failed:`, dlErr.message);
+                                }
+                            }
+                            if (downloadedPaths.length > 0) {
+                                clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
+                                footagePathsPerSection[i] = downloadedPaths;
+                            }
+                            else {
+                                clips[i] = { ...clips[i], status: "failed" };
+                                footagePathsPerSection[i] = null;
+                            }
+                        }
+                        else {
+                            clips[i] = { ...clips[i], status: "failed" };
+                            footagePathsPerSection[i] = null;
+                        }
+                    }
+                    catch (err) {
+                        console.error(`Footage failed for section ${section.id}:`, err);
+                        clips[i] = { ...clips[i], status: "failed" };
+                        footagePathsPerSection[i] = null;
+                    }
+                };
+                // IMPORTANT: clearTimeout is required. Without it, the callback fires 35s
+                // later even after sectionWork() already succeeded, overwriting the good
+                // clips/footagePaths with null — making all sections appear to have failed.
+                let hardTimeoutId;
+                const hardTimeout = new Promise((resolve) => {
+                    hardTimeoutId = setTimeout(() => {
+                        console.warn(`Section ${section.id} timed out after ${SECTION_HARD_CAP_MS}ms — skipping`);
+                        clips[i] = { ...clips[i], status: "failed" };
+                        footagePathsPerSection[i] = null;
+                        resolve();
+                    }, SECTION_HARD_CAP_MS);
+                });
+                await Promise.race([
+                    sectionWork().then(() => clearTimeout(hardTimeoutId)),
+                    hardTimeout,
+                ]);
+            }));
+            // Emit progress after each batch completes
+            const readyCount = clips.filter((c) => c.status === "ready").length;
+            const totalSearchable = clips.filter((c) => c.status !== "skipped").length;
+            const pct = 50 + Math.round((batchEnd / script.sections.length) * 18);
             await emit(videoId, {
                 stage: "footage",
                 progress: pct,
-                message: `Finding clip for: "${section.visual_keywords[0]}"`,
-                script,
-                clips: [...clips],
-            });
-            try {
-                const clip = await findFootage(section, videoId);
-                if (clip) {
-                    const localPath = await downloadClip(clip, videoId, section.id);
-                    clips[i] = { ...clip, localPath, status: "ready" };
-                    footagePaths.push(localPath);
-                }
-                else {
-                    clips[i] = { ...clips[i], status: "failed" };
-                    footagePaths.push(null);
-                }
-            }
-            catch (err) {
-                console.error(`Footage failed for section ${section.id}:`, err);
-                clips[i] = { ...clips[i], status: "failed" };
-                footagePaths.push(null);
-            }
-            await emit(videoId, {
-                stage: "footage",
-                progress: pct,
-                message: `${clips.filter((c) => c.status === "ready").length} clips ready`,
+                message: `${readyCount}/${totalSearchable} clips ready`,
                 script,
                 clips: [...clips],
             });
         }
+        // footagePathsPerSection: up to 3 diverse clips per section for 3-4s cuts
+        // (NOTE: removed the old duplicate sequential loop that re-searched/re-downloaded
+        // footage for every section a second time and pushed mismatched entries into
+        // footagePathsPerSection, doubling search time and misaligning the array passed
+        // to assemble())
         // ── Phase 4: Assembly ───────────────────────────────────────────────
         const renderSteps = RENDER_STEPS.map((s) => ({ ...s }));
         await emit(videoId, {
@@ -173,7 +252,7 @@ async function runPipeline(videoId) {
         await fs.mkdir(outputDir, { recursive: true });
         const bgmPath = await findBgm(script.mood);
         const validAudioPaths = script.sections.map((_, i) => audioPaths[i] || null);
-        const { videoPath, thumbPath } = await assemble(videoId, title, script.sections, validAudioPaths, footagePaths, bgmPath, outputDir, async (step, total, label) => {
+        const { videoPath, thumbPath } = await assemble(videoId, title, script.sections, validAudioPaths, footagePathsPerSection, bgmPath, outputDir, async (step, total, label) => {
             const updatedSteps = renderSteps.map((s, idx) => ({
                 ...s,
                 done: idx < step,

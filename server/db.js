@@ -1,6 +1,11 @@
 import pg from "pg";
 const { Pool } = pg;
-const pool = new Pool({ connectionString: process.env.DATABASE_URL || "postgresql://neondb_owner:npg_rphFGUTMsv37@ep-rough-bonus-a1byqic6-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require" });
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL?.includes("railway.app") || process.env.NODE_ENV === "production"
+        ? { rejectUnauthorized: false }
+        : undefined,
+});
 export async function query(text, params) {
     const client = await pool.connect();
     try {

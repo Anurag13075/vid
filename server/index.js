@@ -4,12 +4,12 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./pipeline/queue.js";
 import videosRouter from "./routes/videos.js";
 const app = express();
-const PORT = process.env.API_PORT || 3001;
+const IS_PROD = process.env.NODE_ENV === "production";
+const PORT = IS_PROD ? (process.env.PORT || 5000) : (process.env.API_PORT || 3001);
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "10mb" }));
 // Serve rendered videos as static files
@@ -67,11 +67,19 @@ app.get("/api/pipeline/:id/status", async (req, res) => {
 app.get("/api/health", (_req, res) => {
     res.json({ ok: true, ts: Date.now() });
 });
+// In production, serve the built frontend and let the SPA handle routing
+if (IS_PROD) {
+    const distPath = path.join(__dirname, "../dist/public");
+    app.use(express.static(distPath));
+    app.get("*", (_req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+    });
+}
 async function main() {
     try {
         await initDb();
         app.listen(PORT, () => {
-            console.log(`🚀 VidRush API server running on http://localhost:${PORT}`);
+            console.log(`🚀 VidRush server running on http://localhost:${PORT} [${IS_PROD ? "production" : "development"}]`);
         });
     }
     catch (err) {
