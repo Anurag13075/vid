@@ -9,29 +9,29 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as CreateRouteImport } from './routes/create'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as ResultJobIdRouteImport } from './routes/result.$jobId'
+import { Route as CreateRouteImport } from './routes/create'
 import { Route as GenerateJobIdRouteImport } from './routes/generate.$jobId'
+import { Route as ResultJobIdRouteImport } from './routes/result.$jobId'
 
-const CreateRoute = CreateRouteImport.update({
-  id: '/create',
-  path: '/create',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ResultJobIdRoute = ResultJobIdRouteImport.update({
-  id: '/result/$jobId',
-  path: '/result/$jobId',
+const CreateRoute = CreateRouteImport.update({
+  id: '/create',
+  path: '/create',
   getParentRoute: () => rootRouteImport,
 } as any)
 const GenerateJobIdRoute = GenerateJobIdRouteImport.update({
   id: '/generate/$jobId',
   path: '/generate/$jobId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResultJobIdRoute = ResultJobIdRouteImport.update({
+  id: '/result/$jobId',
+  path: '/result/$jobId',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -71,13 +71,6 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/create': {
-      id: '/create'
-      path: '/create'
-      fullPath: '/create'
-      preLoaderRoute: typeof CreateRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
@@ -85,11 +78,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/result/$jobId': {
-      id: '/result/$jobId'
-      path: '/result/$jobId'
-      fullPath: '/result/$jobId'
-      preLoaderRoute: typeof ResultJobIdRouteImport
+    '/create': {
+      id: '/create'
+      path: '/create'
+      fullPath: '/create'
+      preLoaderRoute: typeof CreateRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/generate/$jobId': {
@@ -97,6 +90,13 @@ declare module '@tanstack/react-router' {
       path: '/generate/$jobId'
       fullPath: '/generate/$jobId'
       preLoaderRoute: typeof GenerateJobIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/result/$jobId': {
+      id: '/result/$jobId'
+      path: '/result/$jobId'
+      fullPath: '/result/$jobId'
+      preLoaderRoute: typeof ResultJobIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }

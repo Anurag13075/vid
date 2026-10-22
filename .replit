@@ -32,7 +32,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "ulimit -n 65536; bun x vite --host 0.0.0.0 --port 5000"
+args = "bun run dev:frontend"
 waitForPort = 5000
 
 [[workflows.workflow]]
