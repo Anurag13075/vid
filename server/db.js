@@ -2,17 +2,26 @@ import pg from "pg";
 const { Pool } = pg;
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL?.includes("railway.app") || process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : undefined,
+    ssl: { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
 });
-export async function query(text, params) {
-    const client = await pool.connect();
-    try {
-        return await client.query(text, params);
-    }
-    finally {
-        client.release();
+// Prevent unhandled errors on idle clients from crashing the entire Node process
+pool.on("error", (err) => {
+    console.warn("[db pool] Unexpected idle client error:", err.message);
+});
+export async function query(text, params, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            return await pool.query(text, params);
+        }
+        catch (err) {
+            console.warn(`[db] Query attempt ${attempt} failed: ${err.message}`);
+            if (attempt === retries)
+                throw err;
+            await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
     }
 }
 export async function initDb() {
@@ -40,7 +49,6 @@ export async function initDb() {
       updated_at TIMESTAMP DEFAULT NOW()
     )
   `);
-    // Migrate existing tables to add new columns if they don't exist
     const migrations = [
         `ALTER TABLE videos ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'modern'`,
         `ALTER TABLE videos ADD COLUMN IF NOT EXISTS background TEXT DEFAULT 'gradient_dark'`,
@@ -53,7 +61,7 @@ export async function initDb() {
 }
 export async function getVideo(id) {
     const res = await query("SELECT * FROM videos WHERE id = $1", [id]);
-    return res.rows[0] || null;
+    return res?.rows[0] || null;
 }
 export async function updateVideo(id, fields) {
     const keys = Object.keys(fields);
@@ -75,5 +83,5 @@ export async function createVideo(data) {
 }
 export async function listVideos() {
     const res = await query("SELECT id, title, stage, progress, message, video_url, thumbnail_url, duration_seconds, created_at FROM videos ORDER BY created_at DESC LIMIT 50");
-    return res.rows;
+    return res?.rows || [];
 }

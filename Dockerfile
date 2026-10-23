@@ -1,26 +1,28 @@
-FROM node:22-slim
+FROM node:22-alpine
 
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    python3 \
-    python3-pip \
-    python3-venv \
-    --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install edge-tts
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN npm install -g tsx
+# Install FFmpeg and required fonts on Alpine (lightweight: only ~35MB added)
+RUN apk add --no-cache ffmpeg ttf-dejavu
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+# Enable pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
+# Copy package manifests first for efficient docker caching
+COPY package.json pnpm-lock.yaml ./
+
+# Install dependencies (only production & build tools)
+RUN pnpm install --frozen-lockfile
+
+# Copy project source
 COPY . .
-RUN npm run build
 
+# Build the frontend and compile TypeScript
+RUN pnpm run build
+
+ENV NODE_ENV=production
+ENV PORT=5000
 EXPOSE 5000
 
-CMD ["tsx", "server/prod.ts"]
+# Run unified production server (serves both API & Frontend SPA on single port)
+CMD ["npx", "tsx", "server/prod.ts"]

@@ -1,6 +1,14 @@
 import { promises as fs } from "fs";
 import path from "path";
+import os from "os";
+import https from "https";
+import http from "http";
+import { createWriteStream } from "fs";
 const CLIPS_PER_SECTION = 10;
+function getTempDir(subpath = "") {
+    const base = path.join(os.tmpdir(), "vidrush");
+    return subpath ? path.join(base, subpath) : base;
+}
 export function createClipTracker() {
     return new Set();
 }
@@ -46,7 +54,6 @@ function buildTopicFallbacks(title, section) {
         .replace(/[^a-z0-9\s]/g, "")
         .split(/\s+/)
         .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-    // Use up to 4 most meaningful words from the title
     const coreWords = words.slice(0, 4).join(" ");
     const fallbacks = [];
     if (coreWords) {
@@ -55,13 +62,11 @@ function buildTopicFallbacks(title, section) {
         fallbacks.push(`${coreWords} tutorial`);
         fallbacks.push(`${coreWords} demonstration`);
     }
-    // Also try key_point if available
     if (section.key_point) {
         const kp = section.key_point.toLowerCase().slice(0, 50);
         if (kp.length > 4)
             fallbacks.push(kp);
     }
-    // Try first 2 words of title as a broader fallback
     if (words.length >= 2) {
         fallbacks.push(words.slice(0, 2).join(" "));
     }
@@ -171,22 +176,20 @@ async function searchPixabay(keyword, needed, usedIds) {
 export async function findMultipleFootage(section, limit, videoId, usedIds, title) {
     const clips = [];
     const clipsNeeded = limit || CLIPS_PER_SECTION;
-    // Strip generic/banned keywords — they return unrelated stock footage
     const cleanKeywords = section.visual_keywords
         .map(sanitizeKeyword)
         .filter(Boolean);
-    // If all keywords were generic, fall back to key_point or title words
     const keywordsToTry = cleanKeywords.length > 0
         ? cleanKeywords
         : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)];
-    // Phase 1: AI-generated specific keywords → Pexels
+    // Phase 1: Pexels
     for (const keyword of keywordsToTry) {
         if (clips.length >= clipsNeeded)
             break;
         const found = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
         clips.push(...found);
     }
-    // Phase 2: AI-generated specific keywords → Pixabay
+    // Phase 2: Pixabay
     if (clips.length < clipsNeeded) {
         for (const keyword of keywordsToTry) {
             if (clips.length >= clipsNeeded)
@@ -195,7 +198,7 @@ export async function findMultipleFootage(section, limit, videoId, usedIds, titl
             clips.push(...found);
         }
     }
-    // Phase 3: topic-derived fallback from user's title — NOT generic nature/sky shots
+    // Phase 3: topic-derived fallback
     if (clips.length < clipsNeeded) {
         const topicFallbacks = buildTopicFallbacks(title, section);
         console.log(`[footage] Phase 3 fallback for "${keywordsToTry[0]}": trying topic keywords:`, topicFallbacks);
@@ -213,32 +216,59 @@ export async function findMultipleFootage(section, limit, videoId, usedIds, titl
     console.log(`[footage] Section "${keywordsToTry[0]}": ${clips.length}/${clipsNeeded} clips found`);
     return clips;
 }
+// Resilient downloader with redirect handling and streaming
+function downloadUrlToFile(url, destPath, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
+        const fileStream = createWriteStream(destPath);
+        const client = url.startsWith("https") ? https : http;
+        const request = client.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+            // Handle HTTP redirects (301, 302, 307, 308)
+            if (res.statusCode && [301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+                fileStream.close();
+                return downloadUrlToFile(res.headers.location, destPath, timeoutMs).then(resolve).catch(reject);
+            }
+            if (res.statusCode && res.statusCode >= 400) {
+                fileStream.close();
+                return reject(new Error(`Download failed with HTTP ${res.statusCode}`));
+            }
+            res.pipe(fileStream);
+            fileStream.on("finish", () => {
+                fileStream.close(() => resolve());
+            });
+        });
+        request.on("error", (err) => {
+            fileStream.close();
+            fs.unlink(destPath).catch(() => { });
+            reject(err);
+        });
+        request.setTimeout(timeoutMs, () => {
+            request.destroy();
+            fileStream.close();
+            fs.unlink(destPath).catch(() => { });
+            reject(new Error(`Download timed out after ${timeoutMs / 1000}s`));
+        });
+    });
+}
 export async function downloadClip(clip, videoId, suffix) {
-    const tmpDir = path.join("/tmp/vidrush", videoId);
+    const tmpDir = getTempDir(videoId);
     await fs.mkdir(tmpDir, { recursive: true });
     const outPath = path.join(tmpDir, `${suffix}.mp4`);
     if (!clip.videoUrl)
         throw new Error("Clip has no videoUrl");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 25_000);
-    try {
-        const response = await fetch(clip.videoUrl, { signal: controller.signal });
-        clearTimeout(timer);
-        if (!response.ok) {
-            throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            await downloadUrlToFile(clip.videoUrl, outPath, 35000);
+            const stat = await fs.stat(outPath).catch(() => null);
+            if (stat && stat.size > 2000) {
+                return outPath;
+            }
+            throw new Error(`Downloaded file too small (${stat?.size ?? 0} bytes)`);
         }
-        const buffer = await response.arrayBuffer();
-        if (buffer.byteLength < 1000) {
-            throw new Error(`Downloaded file too small (${buffer.byteLength} B)`);
+        catch (err) {
+            if (attempt === 3)
+                throw err;
+            await new Promise(r => setTimeout(r, 1000 * attempt));
         }
-        await fs.writeFile(outPath, Buffer.from(buffer));
-        return outPath;
     }
-    catch (err) {
-        clearTimeout(timer);
-        if (err?.name === "AbortError") {
-            throw new Error(`Download timed out after 25s: ${clip.videoUrl}`);
-        }
-        throw err;
-    }
+    return outPath;
 }

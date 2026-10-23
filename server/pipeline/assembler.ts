@@ -1,9 +1,15 @@
 import { promises as fs } from "fs";
 import path from "path";
+import os from "os";
 import type { ScriptSection, RenderStep } from "./types.js";
 import { ffmpeg, ffprobe, FFMPEG_PATH } from "./ffmpeg.js";
 
 type ProgressFn = (step: number, total: number, label: string) => void | Promise<void>;
+
+export function getTempDir(subpath: string = ""): string {
+  const base = path.join(os.tmpdir(), "vidrush");
+  return subpath ? path.join(base, subpath) : base;
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const OUTPUT_WIDTH = 1920;
@@ -19,8 +25,16 @@ const THREADS = 0; // 0 = auto-detect cores
 const CRF = 26;
 const PRESET = "ultrafast";
 const XFADE_BATCH = 2;
-const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
-const FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+// Windows & Linux font discovery
+const FONT_CANDIDATES = [
+  "C:/Windows/Fonts/arialbd.ttf",
+  "C:/Windows/Fonts/arial.ttf",
+  "C:/Windows/Fonts/segoeui.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+];
+
 const CUT_TARGET_SEC = 3.5;
 const CUT_MIN_SEC = 2.5;
 const CUT_MAX_SEC = 5.0;
@@ -39,8 +53,6 @@ interface ThemeConfig {
 
 const THEME_CONFIGS: Record<string, ThemeConfig> = {
   crime: {
-    // FIX: removed colorchannelmixer — it silently promotes to yuv444p on some FFmpeg builds
-    // Use hue/curves instead which stay in yuv420p
     gradeFilter: "eq=contrast=1.22:brightness=-0.05:saturation=0.85,hue=s=0.85",
     captionAccent: "#e53e3e",
   },
@@ -66,7 +78,6 @@ function resolveTheme(theme?: string): ThemeConfig {
   return THEME_CONFIGS[theme ?? ""] ?? THEME_CONFIGS.standard;
 }
 
-// ─── Section timing passed down to overlay renderer ──────────────────────────
 interface SectionTiming {
   startSec: number;
   endSec: number;
@@ -76,8 +87,8 @@ interface SectionTiming {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function resolveFont(): Promise<string> {
-  for (const f of [FONT, FONT_FALLBACK]) {
-    try { await fs.access(f); return f; } catch {}
+  for (const f of FONT_CANDIDATES) {
+    try { await fs.access(f); return f.replace(/\\/g, "/"); } catch {}
   }
   return "";
 }
@@ -167,10 +178,6 @@ async function renderCut(
   const clipDuration = await ffprobe(clipPath);
   const needsLoop = clipDuration < durationSec;
 
-  // FIX: always end with format=yuv420p so cuts never end up as yuv444p.
-  // colorchannelmixer (used in old crime/history themes) promotes to 444p —
-  // we've removed it from THEME_CONFIGS above, but the explicit format= here
-  // is a belt-and-suspenders guard regardless of grade filter content.
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)},${gradeFilter},format=yuv420p`;
 
   console.log(`[assembler] cut (${motionType}) ${path.basename(clipPath)} → ${path.basename(outPath)} (${durationSec.toFixed(2)}s)`);
@@ -183,7 +190,7 @@ async function renderCut(
     "-r", String(FPS),
     "-threads", String(THREADS),
     "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
-    "-pix_fmt", "yuv420p", // FIX: explicit encoder-level pixel format
+    "-pix_fmt", "yuv420p",
     "-an", "-y", outPath,
   ]);
 }
@@ -266,7 +273,7 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans Bold,52,${primaryColor},${secondaryColor},${outlineColor},${backColor},1,0,0,0,100,100,2,0,3,3,1,2,80,80,80,1
+Style: Default,Arial,52,${primaryColor},${secondaryColor},${outlineColor},${backColor},1,0,0,0,100,100,2,0,3,3,1,2,80,80,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -364,13 +371,15 @@ function buildOverlayFilters(
   return filters;
 }
 
-// ─── Concat demuxer ───────────────────────────────────────────────────────────
+// ─── Concat demuxer (Windows & Linux path safe) ────────────────────────────────
 async function concatClips(clipPaths: string[], outputPath: string): Promise<void> {
   if (clipPaths.length === 0) throw new Error("No cuts to concat");
   if (clipPaths.length === 1) { await fs.copyFile(clipPaths[0], outputPath); return; }
 
   const listPath = outputPath + ".concat.txt";
-  await fs.writeFile(listPath, clipPaths.map(p => `file '${p}'`).join("\n"), "utf8");
+  // Windows-safe forward slashes in concat manifest
+  const lines = clipPaths.map(p => `file '${p.replace(/\\/g, "/")}'`).join("\n");
+  await fs.writeFile(listPath, lines, "utf8");
   console.log(`[assembler] concat: ${clipPaths.length} clips → ${path.basename(outputPath)}`);
 
   await ffmpeg(["-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-fflags", "+genpts", "-y", outputPath]);
@@ -401,7 +410,7 @@ async function xfadeSmallBatch(
     "-filter_complex", fg.slice(0, -1),
     "-map", "[vout]",
     "-threads", String(THREADS), "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
-    "-pix_fmt", "yuv420p", // FIX: ensure xfade output stays 420p
+    "-pix_fmt", "yuv420p",
     "-r", String(FPS), "-an", "-y", outputPath,
   ]);
 }
@@ -473,6 +482,7 @@ async function upscaleAndBurnCaptions(
       await fs.access(assPath);
       const content = await fs.readFile(assPath, "utf8");
       if (content.includes("[Events]")) {
+        // Windows-safe path escaping for ASS filter: C\:/path/to/file.ass
         const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
         captionFilter = `ass='${escaped}'`;
       }
@@ -481,11 +491,6 @@ async function upscaleAndBurnCaptions(
     }
   }
 
-  // FIX: force yuv420p BEFORE the ass filter.
-  // The ass subtitle filter requires yuv420p — feeding it yuv444p (which
-  // colorchannelmixer or some source clips can produce) causes libx264 to
-  // select "High 4:4:4 Predictive" profile, ballooning RAM usage and
-  // triggering an OOM kill (exit code null) on Railway free plan.
   const vfParts = [upscale, "format=yuv420p"];
   if (captionFilter) vfParts.push(captionFilter);
 
@@ -496,7 +501,7 @@ async function upscaleAndBurnCaptions(
     "-vf", vfParts.join(","),
     "-threads", "0",
     "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
-    "-pix_fmt", "yuv420p", // FIX: belt-and-suspenders at encoder level
+    "-pix_fmt", "yuv420p",
     "-an", "-y", outputPath,
   ]);
 }
@@ -519,7 +524,7 @@ async function overlayAndMixAudio(
   const encodeArgs = [
     "-threads", "0",
     "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
-    "-pix_fmt", "yuv420p", // FIX: keep 420p through final pass too
+    "-pix_fmt", "yuv420p",
   ];
   const videoFilter = overlayFilters.length > 0 ? overlayFilters.join(",") : "copy";
   const videoArgs = overlayFilters.length > 0 ? ["-vf", videoFilter] : [];
@@ -563,16 +568,13 @@ async function finalMixWithCaptions(
   const tmpDir = path.dirname(videoPath);
   const pass1Out = path.join(tmpDir, "pass1_captioned.mp4");
 
-  // Pass 1: upscale 720→1080 + burn ASS captions (yuv420p enforced)
   await upscaleAndBurnCaptions(videoPath, assPath, pass1Out);
 
-  // Pass 2: drawtext/drawbox overlays + audio mix → final output
   await overlayAndMixAudio(
     pass1Out, voiceoverPath, bgmPath,
     outputPath, videoTitle, sectionTimings, accentHex
   );
 
-  // Clean up pass 1 intermediate
   await fs.unlink(pass1Out).catch(() => {});
 }
 
@@ -590,7 +592,7 @@ async function makeBlackClip(outPath: string, durationSec: number): Promise<void
     "-f", "lavfi", "-i", `color=c=black:size=${INTERMEDIATE_WIDTH}x${INTERMEDIATE_HEIGHT}:rate=${FPS}`,
     "-t", String(durationSec),
     "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-    "-pix_fmt", "yuv420p", // FIX: black clips must also be 420p
+    "-pix_fmt", "yuv420p",
     "-an", "-y", outPath,
   ]);
 }
@@ -640,7 +642,7 @@ export async function assemble(
   onProgress: ProgressFn,
   theme?: string
 ): Promise<{ videoPath: string; thumbPath: string }> {
-  const tmpDir = path.join("/tmp/vidrush", videoId);
+  const tmpDir = getTempDir(videoId);
   await fs.mkdir(tmpDir, { recursive: true });
   await fs.mkdir(outputDir, { recursive: true });
 
@@ -733,7 +735,7 @@ export async function assemble(
             "-vf", `scale=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${INTERMEDIATE_WIDTH}:${INTERMEDIATE_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p`,
             "-t", String(durationSec), "-r", String(FPS),
             "-threads", String(THREADS), "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
-            "-pix_fmt", "yuv420p", // FIX: fallback path also needs 420p
+            "-pix_fmt", "yuv420p",
             "-an", "-y", fp,
           ]);
           renderedCuts.push(fp);

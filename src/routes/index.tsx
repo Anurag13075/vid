@@ -1,6 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { TopicInput } from "@/components/TopicInput";
+import { VoiceCommandBar } from "@/components/VoiceCommandBar";
+import { useNavigate } from "@tanstack/react-router";
 import { Logo } from "@/components/Logo";
 import {
   ArrowRight,
@@ -732,5 +734,19 @@ function Footer() {
         </nav>
       </div>
     </footer>
+  );
+}
+
+
+function VoiceCommandHero() {
+  const navigate = useNavigate();
+  return (
+    <div className="w-full max-w-2xl mx-auto">
+      <VoiceCommandBar onActionExecuted={(res) => {
+        if (res.execution?.newVideoId) {
+          navigate({ to: "/generate/$jobId", params: { jobId: res.execution.newVideoId } });
+        }
+      }} />
+    </div>
   );
 }

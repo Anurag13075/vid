@@ -1,4 +1,4 @@
-export declare function query(text: string, params?: unknown[]): Promise<import("pg").QueryResult<any>>;
+export declare function query(text: string, params?: unknown[], retries?: number): Promise<import("pg").QueryResult<any> | undefined>;
 export declare function initDb(): Promise<void>;
 export declare function getVideo(id: string): Promise<any>;
 export declare function updateVideo(id: string, fields: Record<string, unknown>): Promise<void>;

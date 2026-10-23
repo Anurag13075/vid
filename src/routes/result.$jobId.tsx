@@ -1,7 +1,8 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Logo } from "@/components/Logo";
 import { useJob } from "@/lib/usePipeline";
+import { VoiceCommandBar } from "@/components/VoiceCommandBar";
 import {
   Check, Copy, Download, RotateCcw, Sparkles, Loader2,
   Film, Clock, Mic, Maximize2,
@@ -15,6 +16,7 @@ export const Route = createFileRoute("/result/$jobId")({
 function ResultPage() {
   const { jobId } = Route.useParams();
   const job = useJob(jobId);
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"overview" | "script" | "clips">("overview");
 
   if (!job) {
@@ -109,7 +111,6 @@ function ResultPage() {
 
   const voiceLabel = job.voice.split("-").slice(2).join("-").replace("Neural", "") || job.voice;
 
-  // Estimate duration from sections
   const estSec = scriptData.sections
     .filter((s) => s.section_type !== "graphic")
     .reduce((acc, s) => acc + (s.duration || 0), 0);
@@ -125,7 +126,7 @@ function ResultPage() {
   ];
 
   return (
-    <div className="dark-app min-h-screen">
+    <div className="dark-app min-h-screen pb-20">
       <header className="h-14 border-b border-[var(--border)] flex items-center px-5 justify-between">
         <Logo />
         <Link
@@ -137,7 +138,19 @@ function ResultPage() {
         </Link>
       </header>
 
-      <main className="max-w-5xl mx-auto px-5 py-10">
+      <main className="max-w-5xl mx-auto px-5 py-8">
+        {/* Real-time Voice Command Bar for post-production editing */}
+        <div className="mb-8">
+          <VoiceCommandBar
+            videoId={jobId}
+            onActionExecuted={(res) => {
+              if (res.execution?.newVideoId) {
+                navigate({ to: "/generate/$jobId", params: { jobId: res.execution.newVideoId } });
+              }
+            }}
+          />
+        </div>
+
         {/* Status */}
         <div className="flex items-center gap-2 text-[12px] text-[var(--success)] mb-4 animate-fade-in">
           <Sparkles className="h-3.5 w-3.5" />
@@ -165,6 +178,7 @@ function ResultPage() {
 
         {/* Video player */}
         <video
+          key={videoUrl}
           src={videoUrl}
           controls
           poster={job.thumbnailUrl}
@@ -257,7 +271,7 @@ function ResultPage() {
                       {s.section_type}
                     </span>
                     <span className="text-[11px] text-[var(--accent-hover)] truncate flex-1">
-                      {s.visual_keyword}
+                      {Array.isArray(s.visual_keywords) ? s.visual_keywords.join(", ") : (s as any).visual_keyword}
                     </span>
                     {s.key_point && (
                       <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--border)] text-[var(--text-secondary)] shrink-0">
@@ -265,7 +279,7 @@ function ResultPage() {
                       </span>
                     )}
                     <span className="text-[10px] font-mono text-[var(--text-muted)] tabular-nums shrink-0">
-                      ~{s.duration}s
+                      ~{s.duration || 10}s
                     </span>
                   </div>
                   {s.narration ? (
