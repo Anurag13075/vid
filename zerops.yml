@@ -1,0 +1,28 @@
+zerops:
+  - setup: app
+    build:
+      base: nodejs@22
+      prepareCommands:
+        - sudo npm install -g pnpm@9.15.5
+      buildCommands:
+        - pnpm install
+        - pnpm run build
+      deployFiles:
+        - dist
+        - server
+        - data
+        - node_modules
+        - package.json
+        - tsconfig.json
+    run:
+      base: nodejs@22
+      prepareCommands:
+        - sudo apk add ffmpeg ttf-dejavu
+        - sudo npm install -g tsx
+      ports:
+        - port: 5000
+          httpSupport: true
+      envVariables:
+        PORT: 5000
+        NODE_ENV: production
+      start: tsx server/prod.ts
