@@ -86,9 +86,12 @@ function Nav() {
           <a href="#faq" className="hover:text-[var(--ink)] transition-colors">FAQ</a>
         </nav>
         <div className="flex items-center gap-3">
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-700 text-[11.5px] font-medium">
-            <Sparkles className="h-3 w-3 text-purple-600" /> Wispr Flow Hackathon
-          </span>
+          <Link
+            to="/result/demo"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-purple-600 text-white hover:bg-purple-700 transition-colors text-[12.5px] font-medium shadow-sm"
+          >
+            <Play className="h-3 w-3 fill-current" /> Live Voice Demo
+          </Link>
           <Link
             to="/create"
             className="text-[13px] px-4 py-2 rounded-xl bg-[var(--ink)] text-white hover:bg-black transition-colors font-medium shadow-sm"
@@ -140,6 +143,15 @@ function Hero() {
 
         <div className="mt-10 w-full animate-fade-up" style={{ animationDelay: "160ms" }}>
           <TopicInput />
+          <div className="mt-4 flex justify-center">
+            <Link
+              to="/result/demo"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 text-purple-900 hover:text-purple-950 text-[13px] font-medium transition-all"
+            >
+              <Play className="h-3.5 w-3.5 fill-current text-purple-600" />
+              <span>Or jump directly to the <strong>Live Dictation Demo Video</strong> →</span>
+            </Link>
+          </div>
         </div>
 
         {/* Hackathon Feature Highlights */}

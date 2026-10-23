@@ -17,6 +17,9 @@ import {
   Film,
   FastForward,
   Palette,
+  Scissors,
+  ZoomIn,
+  Gauge,
 } from "lucide-react";
 
 export interface ActionChip {
@@ -34,21 +37,31 @@ export interface CommandHistoryItem {
   actions: ActionChip[];
 }
 
+export interface VoiceActionEvent {
+  type: string;
+  payload?: any;
+  message: string;
+}
+
 interface VoiceCommandBarProps {
   videoId?: string;
   videoElement?: HTMLVideoElement | null;
   sections?: Array<{ title?: string; duration?: number; section_type?: string }>;
   onActionExecuted?: (actionResult: any) => void;
+  onVoiceAction?: (action: VoiceActionEvent) => void;
   className?: string;
 }
 
 // Preset spoken suggestions for judges to click or read aloud
 const SUGGESTED_VOICE_COMMANDS = [
-  { label: "Switch voice to Brian", icon: Volume2, tag: "voice" },
-  { label: "Make theme cinematic", icon: Palette, tag: "theme" },
-  { label: "Replace scene 1 clips with aerial drone view", icon: Film, tag: "footage" },
-  { label: "Rewrite scene 2 with more suspense", icon: Wand2, tag: "rewrite" },
-  { label: "Jump to scene 2", icon: FastForward, tag: "timeline" },
+  { label: "video split in two parts", icon: Scissors, tag: "split" },
+  { label: "make color grading cinematic", icon: Palette, tag: "grade" },
+  { label: "make color grading vintage 1970s", icon: Film, tag: "vintage" },
+  { label: "zoom in on the video", icon: ZoomIn, tag: "zoom" },
+  { label: "speed up to 1.5x", icon: Gauge, tag: "speed" },
+  { label: "go to 1 minute 30", icon: FastForward, tag: "seek" },
+  { label: "pause the video", icon: Pause, tag: "pause" },
+  { label: "play the video", icon: Play, tag: "play" },
 ];
 
 export function VoiceCommandBar({
@@ -56,6 +69,7 @@ export function VoiceCommandBar({
   videoElement,
   sections,
   onActionExecuted,
+  onVoiceAction,
   className = "",
 }: VoiceCommandBarProps) {
   const [commandText, setCommandText] = useState("");
@@ -79,6 +93,7 @@ export function VoiceCommandBar({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const speechRecognitionRef = useRef<any>(null);
+  const lastProcessedTextRef = useRef<string>("");
 
   // Auto-resize textarea
   useEffect(() => {
@@ -118,7 +133,6 @@ export function VoiceCommandBar({
         if (!analyserRef.current) return;
         analyserRef.current.getByteFrequencyData(dataArray);
 
-        // Sample 16 frequency bands normalized 0-100%
         const bars: number[] = [];
         const step = Math.floor(bufferLength / 16) || 1;
         for (let i = 0; i < 16; i++) {
@@ -144,69 +158,209 @@ export function VoiceCommandBar({
     setAudioLevel(Array(16).fill(10));
   };
 
-  // ─── Direct Player Timeline Control ─────────────────────────────────────────
-  const handleLocalPlayerControl = useCallback(
-    (text: string): boolean => {
-      const lower = text.toLowerCase().trim();
-      if (!videoElement) return false;
+  // ─── Real-Time Live Voice Command Interpreter ──────────────────────────────
+  const handleLiveVoiceCommand = useCallback(
+    (rawText: string): boolean => {
+      const text = rawText.toLowerCase().trim();
+      if (!text || text === lastProcessedTextRef.current) return false;
 
-      // Play
-      if (lower === "play" || lower.includes("play video") || lower.includes("start video")) {
-        videoElement.play();
-        setStatusMessage("▶️ Video playing");
-        setTimeout(() => setStatusMessage(null), 2500);
+      // 1. SPLIT VIDEO IN TWO PARTS / MULTIPLE PARTS
+      if (
+        text.includes("split in two") ||
+        text.includes("split in 2") ||
+        text.includes("split into two") ||
+        text.includes("split into 2") ||
+        text.includes("split video in two") ||
+        text.includes("video split in two")
+      ) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "split_parts", payload: { parts: 2 }, message: "✂️ Split video in two parts" });
+        setStatusMessage("✂️ Video split into 2 parts!");
         return true;
       }
 
-      // Pause
-      if (lower === "pause" || lower.includes("pause video") || lower.includes("stop playback")) {
-        videoElement.pause();
-        setStatusMessage("⏸️ Video paused");
-        setTimeout(() => setStatusMessage(null), 2500);
+      if (text.includes("split in three") || text.includes("split in 3") || text.includes("split into 3")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "split_parts", payload: { parts: 3 }, message: "✂️ Split video in three parts" });
+        setStatusMessage("✂️ Video split into 3 parts!");
         return true;
       }
 
-      // Mute / Unmute
-      if (lower.includes("mute") || lower.includes("unmute")) {
-        videoElement.muted = !videoElement.muted;
-        setStatusMessage(videoElement.muted ? "🔇 Video muted" : "🔊 Video unmuted");
-        setTimeout(() => setStatusMessage(null), 2500);
+      if (text.includes("split at current") || text.includes("split here") || text.includes("cut here") || text.includes("cut video here")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "split_at_current", message: "✂️ Split at current time" });
+        setStatusMessage("✂️ Cut marked at current timestamp");
         return true;
       }
 
-      // Jump to scene X
-      const sceneMatch = lower.match(/jump to scene (\d+)|go to scene (\d+)|show scene (\d+)/i);
+      const partMatch = text.match(/play part (\d+)|go to part (\d+)|show part (\d+)/i);
+      if (partMatch) {
+        const pNum = parseInt(partMatch[1] || partMatch[2] || partMatch[3], 10);
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "jump_part", payload: { partIndex: pNum }, message: `Playing Part ${pNum}` });
+        setStatusMessage(`▶️ Switched to Part ${pNum}`);
+        return true;
+      }
+
+      // 2. COLOR GRADING SHIFTS
+      if (text.includes("color grading cinematic") || text.includes("make it cinematic") || text.includes("cinematic color") || text.includes("cinematic look")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "color_grade", payload: { grade: "cinematic" }, message: "🎨 Color grade set to Cinematic" });
+        setStatusMessage("🎨 Cinematic color grade applied!");
+        return true;
+      }
+
+      if (text.includes("black and white") || text.includes("noir") || text.includes("monochrome") || text.includes("grayscale")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "color_grade", payload: { grade: "noir" }, message: "🎨 Color grade set to Black & White Noir" });
+        setStatusMessage("🎨 Noir monochrome applied!");
+        return true;
+      }
+
+      if (text.includes("vintage") || text.includes("1970s") || text.includes("sepia") || text.includes("retro")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "color_grade", payload: { grade: "vintage" }, message: "🎨 Color grade set to Vintage 1970s" });
+        setStatusMessage("🎨 1970s Vintage film look applied!");
+        return true;
+      }
+
+      if (text.includes("cyberpunk") || text.includes("neon")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "color_grade", payload: { grade: "cyberpunk" }, message: "🎨 Color grade set to Cyberpunk Neon" });
+        setStatusMessage("🎨 Cyberpunk neon grade applied!");
+        return true;
+      }
+
+      if (text.includes("reset color") || text.includes("normal color") || text.includes("remove filter") || text.includes("original color")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "color_grade", payload: { grade: "none" }, message: "🎨 Reset color grading" });
+        setStatusMessage("🎨 Color grading reset to normal");
+        return true;
+      }
+
+      // 3. ZOOM & VISUAL EFFECTS
+      if (text.includes("zoom in") || text.includes("zoom in on the video") || text.includes("scale up")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "zoom", payload: { scale: 1.3 }, message: "🔍 Zoom in (1.3x)" });
+        setStatusMessage("🔍 Zoomed in 1.3x");
+        return true;
+      }
+
+      if (text.includes("zoom out") || text.includes("reset zoom") || text.includes("normal zoom")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "zoom", payload: { scale: 1.0 }, message: "🔍 Zoom reset (1.0x)" });
+        setStatusMessage("🔍 Zoom reset to default");
+        return true;
+      }
+
+      if (text.includes("vignette") || text.includes("radial shadow")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "vignette", message: "🎬 Vignette effect toggled" });
+        setStatusMessage("🎬 Radial vignette effect toggled!");
+        return true;
+      }
+
+      // 4. SPEED & DURATION
+      if (text.includes("2x speed") || text.includes("double speed") || text.includes("speed 2")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "speed", payload: { rate: 2.0 }, message: "⚡ Speed: 2x" });
+        setStatusMessage("⚡ Playback speed set to 2.0x");
+        return true;
+      }
+
+      if (text.includes("1.5x speed") || text.includes("faster") || text.includes("speed up") || text.includes("speed 1.5")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "speed", payload: { rate: 1.5 }, message: "⚡ Speed: 1.5x" });
+        setStatusMessage("⚡ Playback speed set to 1.5x");
+        return true;
+      }
+
+      if (text.includes("slow motion") || text.includes("0.5x") || text.includes("half speed") || text.includes("slower")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "speed", payload: { rate: 0.5 }, message: "⚡ Slow motion (0.5x)" });
+        setStatusMessage("⚡ Slow motion 0.5x applied");
+        return true;
+      }
+
+      if (text.includes("normal speed") || text.includes("1x speed") || text.includes("regular speed")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "speed", payload: { rate: 1.0 }, message: "⚡ Speed: 1.0x" });
+        setStatusMessage("⚡ Normal playback speed restored");
+        return true;
+      }
+
+      // 5. TIMELINE SCRUBBING
+      const timeMinSec = text.match(/(?:go to|seek to|jump to) (\d+)\s*(?:minute|min|m)\s*(?:and)?\s*(\d+)?\s*(?:second|sec|s)?/i);
+      if (timeMinSec) {
+        const mins = parseInt(timeMinSec[1], 10) || 0;
+        const secs = parseInt(timeMinSec[2], 10) || 0;
+        const total = mins * 60 + secs;
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "seek", payload: { seconds: total }, message: `⏩ Seek to ${mins}:${String(secs).padStart(2, '0')}` });
+        setStatusMessage(`⏩ Scrubbed to ${mins}:${String(secs).padStart(2, '0')}`);
+        return true;
+      }
+
+      const timeSecOnly = text.match(/(?:go to|seek to|jump to) (\d+)\s*(?:second|sec|s)/i);
+      if (timeSecOnly) {
+        const secs = parseInt(timeSecOnly[1], 10) || 0;
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "seek", payload: { seconds: secs }, message: `⏩ Seek to ${secs}s` });
+        setStatusMessage(`⏩ Scrubbed to ${secs}s`);
+        return true;
+      }
+
+      const sceneMatch = text.match(/(?:jump to|go to|show) scene (\d+)/i);
       if (sceneMatch && sections && sections.length > 0) {
-        const idx = parseInt(sceneMatch[1] || sceneMatch[2] || sceneMatch[3], 10) - 1;
+        const idx = parseInt(sceneMatch[1], 10) - 1;
         if (idx >= 0 && idx < sections.length) {
-          // Calculate start timestamp
           let seekSec = 0;
-          for (let i = 0; i < idx; i++) {
-            seekSec += sections[i]?.duration || 0;
-          }
-          videoElement.currentTime = seekSec;
-          videoElement.play();
-          setStatusMessage(`⏩ Jumped to Scene ${idx + 1} (${Math.floor(seekSec)}s)`);
-          setTimeout(() => setStatusMessage(null), 3000);
+          for (let i = 0; i < idx; i++) seekSec += sections[i]?.duration || 0;
+          lastProcessedTextRef.current = text;
+          onVoiceAction?.({ type: "seek", payload: { seconds: seekSec }, message: `⏩ Jumped to Scene ${idx + 1}` });
+          setStatusMessage(`⏩ Jumped to Scene ${idx + 1}`);
           return true;
         }
       }
 
-      // Seek to beginning
-      if (lower.includes("from the beginning") || lower.includes("restart video")) {
-        videoElement.currentTime = 0;
-        videoElement.play();
+      // 6. PLAY / PAUSE / RESTART
+      if (text === "play" || text === "play video" || text === "start video" || text === "resume" || text.includes("play the video")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "play", message: "▶️ Video Playing" });
+        setStatusMessage("▶️ Video playing via Wispr Flow");
+        return true;
+      }
+
+      if (text === "pause" || text === "pause video" || text === "stop video" || text.includes("pause the video") || text.includes("stop the video")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "pause", message: "⏸️ Video Paused" });
+        setStatusMessage("⏸️ Video paused via Wispr Flow");
+        return true;
+      }
+
+      if (text.includes("restart") || text.includes("from the beginning")) {
+        lastProcessedTextRef.current = text;
+        onVoiceAction?.({ type: "restart", message: "⏮️ Restarted" });
         setStatusMessage("⏮️ Restarted from beginning");
-        setTimeout(() => setStatusMessage(null), 2500);
         return true;
       }
 
       return false;
     },
-    [videoElement, sections]
+    [onVoiceAction, sections]
   );
 
-  // ─── Wispr Flow Audio Dictation ───────────────────────────────────────────
+  // ─── Wispr Flow Desktop App Real-Time Typing Listener ───────────────────────
+  // Automatically detects when Wispr Flow desktop app dictates text into the textarea
+  useEffect(() => {
+    if (!commandText.trim()) return;
+    const timer = setTimeout(() => {
+      handleLiveVoiceCommand(commandText);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [commandText, handleLiveVoiceCommand]);
+
+  // ─── Wispr Flow In-Browser Audio Dictation ─────────────────────────────────
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -214,7 +368,6 @@ export function VoiceCommandBar({
 
       startAudioWaveform(stream);
 
-      // Start zero-latency Web Speech recognition for interim live text
       const SpeechRecognition =
         (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRecognition) {
@@ -227,14 +380,16 @@ export function VoiceCommandBar({
             const current = Array.from(e.results)
               .map((r: any) => r[0].transcript)
               .join("");
-            if (current) setCommandText(current);
+            if (current) {
+              setCommandText(current);
+              handleLiveVoiceCommand(current);
+            }
           };
           rec.start();
           speechRecognitionRef.current = rec;
         } catch {}
       }
 
-      // MediaRecorder for high-fidelity Wispr Flow cloud transcription
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : "audio/webm";
@@ -272,7 +427,7 @@ export function VoiceCommandBar({
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      setStatusMessage("Transcribing via Wispr Flow...");
+      setStatusMessage("Processing Wispr Flow dictation...");
     }
   };
 
@@ -299,15 +454,12 @@ export function VoiceCommandBar({
             setCommandText(data.text);
             setStatusMessage(`Dictated via ${data.provider === "wispr-flow" ? "Wispr Flow" : "Wispr / Groq"}`);
 
-            // First check if it's a direct timeline playback command
-            const handledLocally = handleLocalPlayerControl(data.text);
-            if (!handledLocally) {
-              // Automatically interpret command with AI
+            // First check if live local video operations execute it
+            const handled = handleLiveVoiceCommand(data.text);
+            if (!handled) {
               await interpretCommand(data.text);
             }
           }
-        } else {
-          setStatusMessage("Transcription complete");
         }
         setIsProcessing(false);
       };
@@ -318,12 +470,11 @@ export function VoiceCommandBar({
     }
   };
 
-  // ─── Voice Command Interpretation via Groq ────────────────────────────────
+  // ─── Voice Command Interpretation via Groq (for AI Edits) ──────────────────
   const interpretCommand = async (text: string) => {
     if (!text.trim()) return;
 
-    // Check if player handles it locally first
-    if (handleLocalPlayerControl(text)) {
+    if (handleLiveVoiceCommand(text)) {
       setPreviewActions([]);
       setPreviewSummary(null);
       return;
@@ -367,44 +518,11 @@ export function VoiceCommandBar({
             return { type: act.type, label: "Set Theme", details: act.theme, actionPayload: act };
           if (act.type === "set_pacing")
             return { type: act.type, label: "Set Pacing", details: act.speed, actionPayload: act };
-          if (act.type === "set_captions")
-            return {
-              type: act.type,
-              label: "Captions",
-              details: act.enabled ? "Enabled" : "Disabled",
-              actionPayload: act,
-            };
-          if (act.type === "navigate") {
-            return {
-              type: act.type,
-              label: act.action.replace("_", " ").toUpperCase(),
-              details: act.scene_index ? `Scene ${act.scene_index}` : "",
-              actionPayload: act,
-            };
-          }
           return { type: act.type, label: act.type, details: "", actionPayload: act };
         });
 
         setPreviewActions(chips);
         setStatusMessage("Action ready to execute");
-
-        // If it's a navigation action from AI, execute locally right away!
-        for (const c of chips) {
-          if (c.type === "navigate" && c.actionPayload) {
-            const act = c.actionPayload;
-            if (act.action === "play" && videoElement) videoElement.play();
-            if (act.action === "pause" && videoElement) videoElement.pause();
-            if (act.action === "jump_scene" && act.scene_index && sections) {
-              const idx = act.scene_index - 1;
-              let seek = 0;
-              for (let i = 0; i < idx; i++) seek += sections[i]?.duration || 0;
-              if (videoElement) {
-                videoElement.currentTime = seek;
-                videoElement.play();
-              }
-            }
-          }
-        }
       }
     } catch (err) {
       console.error("Interpretation error:", err);
@@ -418,8 +536,7 @@ export function VoiceCommandBar({
   const executeCommand = async () => {
     if (!commandText.trim()) return;
 
-    // Check player control first
-    if (handleLocalPlayerControl(commandText)) {
+    if (handleLiveVoiceCommand(commandText)) {
       setCommandText("");
       setPreviewActions([]);
       setPreviewSummary(null);
@@ -487,8 +604,8 @@ export function VoiceCommandBar({
             <span className="text-[13px] font-semibold tracking-wide text-white/95">
               Wispr Flow Voice Director
             </span>
-            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-white/[0.06] text-white/70 border border-white/10">
-              Realtime AI Dictation
+            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              ⚡ Realtime Dictation Active
             </span>
           </div>
 
@@ -555,7 +672,9 @@ export function VoiceCommandBar({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (previewActions.length > 0) {
+                  if (handleLiveVoiceCommand(commandText)) {
+                    setCommandText("");
+                  } else if (previewActions.length > 0) {
                     executeCommand();
                   } else {
                     interpretCommand(commandText);
@@ -564,10 +683,10 @@ export function VoiceCommandBar({
               }}
               placeholder={
                 isRecording
-                  ? "Listening... Speak naturally (e.g., 'Rewrite scene 2 with more dramatic tone' or 'Play video')..."
-                  : "Dictate with Wispr Flow or type command (Press Enter)..."
+                  ? "Listening with Wispr Flow... Speak any command..."
+                  : "Dictate with your Wispr Flow desktop app or click mic (e.g. 'video split in two parts', 'make color grading cinematic')..."
               }
-              className="w-full bg-transparent text-[15px] text-white placeholder:text-white/30 resize-none outline-none leading-relaxed pr-8 py-2 font-normal"
+              className="w-full bg-transparent text-[15px] text-white placeholder:text-white/35 resize-none outline-none leading-relaxed pr-8 py-2 font-normal"
             />
           </div>
 
@@ -586,7 +705,10 @@ export function VoiceCommandBar({
 
           {/* Action Trigger Button */}
           <button
-            onClick={previewActions.length > 0 ? executeCommand : () => interpretCommand(commandText)}
+            onClick={previewActions.length > 0 ? executeCommand : () => {
+              if (!handleLiveVoiceCommand(commandText)) interpretCommand(commandText);
+              else setCommandText("");
+            }}
             disabled={!commandText.trim() || isProcessing || isExecuting}
             className="h-11 px-5 rounded-2xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium text-[13.5px] flex items-center gap-2 shadow-lg shadow-purple-600/25 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
           >
@@ -598,7 +720,7 @@ export function VoiceCommandBar({
               </>
             ) : (
               <>
-                <Sparkles className="h-4 w-4" /> Interpret
+                <Sparkles className="h-4 w-4" /> Execute
               </>
             )}
           </button>
@@ -623,17 +745,17 @@ export function VoiceCommandBar({
 
         {/* One-Click Spoken Suggestions for Judges */}
         <div className="mt-4 pt-3 border-t border-white/5 flex flex-wrap items-center gap-2">
-          <span className="text-[11px] text-white/40 uppercase tracking-wider font-semibold mr-1">
-            Try Dictating:
+          <span className="text-[11px] text-purple-300 uppercase tracking-wider font-semibold mr-1 flex items-center gap-1">
+            <Zap className="h-3 w-3 text-purple-400" /> Dictate or Click:
           </span>
           {SUGGESTED_VOICE_COMMANDS.map((cmd) => (
             <button
               key={cmd.label}
               onClick={() => {
                 setCommandText(cmd.label);
-                interpretCommand(cmd.label);
+                handleLiveVoiceCommand(cmd.label);
               }}
-              className="px-2.5 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.09] border border-white/[0.07] text-white/70 hover:text-white text-[11.5px] flex items-center gap-1.5 transition-colors"
+              className="px-2.5 py-1 rounded-lg bg-white/[0.04] hover:bg-purple-500/20 hover:border-purple-500/40 border border-white/[0.07] text-white/80 hover:text-purple-200 text-[11.5px] flex items-center gap-1.5 transition-all"
             >
               <cmd.icon className="h-3 w-3 text-purple-400" />
               <span>"{cmd.label}"</span>
@@ -661,7 +783,7 @@ export function VoiceCommandBar({
               <button
                 onClick={() => {
                   setCommandText(item.command);
-                  interpretCommand(item.command);
+                  handleLiveVoiceCommand(item.command);
                 }}
                 className="text-purple-400 hover:text-purple-300 flex items-center gap-1 text-[11.5px] ml-3 shrink-0 font-medium transition-colors"
               >
