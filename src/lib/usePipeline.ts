@@ -5,7 +5,7 @@ export function useJob(jobId: string | undefined): Job | undefined {
   const { data } = useQuery({
     queryKey: ["video", jobId],
     queryFn: () => fetchJob(jobId!),
-    enabled: !!jobId,
+    enabled: !!jobId && jobId !== "demo" && jobId !== "showcase",
     refetchInterval: (query) => {
       const job = query.state.data;
       if (!job) return 3000;
