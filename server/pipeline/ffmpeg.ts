@@ -1,17 +1,30 @@
 import { spawn, spawnSync } from "child_process";
 import ffmpegStatic from "ffmpeg-static";
+import path from "path";
+import fs from "fs";
 
-// Prefer system ffmpeg (from nix/PATH) — spawnSync works in ESM, require() does not
+// Resolve FFmpeg binary cross-platform
 const FFMPEG_PATH = (() => {
-  const result = spawnSync("which", ["ffmpeg"], { encoding: "utf8" });
-  if (result.status === 0 && result.stdout?.trim()) return result.stdout.trim();
-  return (ffmpegStatic as string | null) || "ffmpeg";
+  // Use ffmpeg-static npm binary
+  if (ffmpegStatic && fs.existsSync(ffmpegStatic)) {
+    return ffmpegStatic;
+  }
+
+  // System fallback
+  const isWindows = process.platform === "win32";
+  const cmd = isWindows ? "where.exe" : "which";
+  try {
+    const result = spawnSync(cmd, ["ffmpeg"], { encoding: "utf8" });
+    if (result.status === 0 && result.stdout?.trim()) {
+      return result.stdout.trim().split("\r\n")[0].split("\n")[0];
+    }
+  } catch {}
+
+  return "ffmpeg";
 })();
 
 export { FFMPEG_PATH };
-console.log(`[ffmpeg] using binary: ${FFMPEG_PATH}`);
 
-// 10 minutes — enough for any single ffmpeg operation in the pipeline
 const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
 
 function runProcess(
@@ -56,49 +69,23 @@ export async function ffmpeg(args: string[]): Promise<void> {
   }
 }
 
-// ─── ffprobe: try system binary first, then fallback via ffmpeg -i ────────────
-async function probeWithFfprobe(filePath: string): Promise<number> {
-  const { stdout } = await runProcess("ffprobe", [
-    "-v", "error",
-    "-show_entries", "format=duration",
-    "-of", "default=noprint_wrappers=1:nokey=1",
-    filePath,
-  ]);
-  const sec = parseFloat(stdout.trim());
-  return Number.isFinite(sec) && sec > 0 ? sec : 0;
-}
-
-async function probeWithFfmpegFallback(filePath: string): Promise<number> {
-  // ffmpeg -i prints duration to stderr even though it "fails" (no output file)
-  let stderr = "";
+// ─── Fast, reliable synchronous audio/video duration probe ───────────────────
+export async function ffprobe(filePath: string): Promise<number> {
   try {
-    await runProcess(FFMPEG_PATH, [
-      "-hide_banner", "-loglevel", "error",
+    const res = spawnSync(FFMPEG_PATH, [
+      "-hide_banner",
       "-i", filePath,
-      "-f", "null", "-",
-    ]);
+    ], { encoding: "utf8", timeout: 10000 });
+
+    const match = (res.stderr || "").match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/i);
+    if (match) {
+      const dur = Number(match[1]) * 3600 + Number(match[2]) * 60 + parseFloat(match[3]);
+      if (Number.isFinite(dur) && dur > 0) return dur;
+    }
   } catch (err) {
-    stderr = err instanceof Error ? err.message : String(err);
+    console.warn(`[ffprobe] probing ${filePath} failed:`, (err as Error).message);
   }
 
-  const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/i);
-  if (!match) return 0;
-  return Number(match[1]) * 3600 + Number(match[2]) * 60 + parseFloat(match[3]);
-}
-
-export async function ffprobe(filePath: string): Promise<number> {
-  // Try ffprobe binary
-  try {
-    const dur = await probeWithFfprobe(filePath);
-    if (dur > 0) return dur;
-  } catch {}
-
-  // Fall back to parsing ffmpeg -i stderr
-  try {
-    const dur = await probeWithFfmpegFallback(filePath);
-    if (dur > 0) return dur;
-  } catch {}
-
-  console.warn(`ffprobe: could not determine duration for ${filePath}, defaulting to 5s`);
+  console.warn(`[ffprobe] could not determine duration for ${filePath}, defaulting to 5s`);
   return 5;
 }

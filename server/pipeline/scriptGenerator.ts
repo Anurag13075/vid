@@ -1,6 +1,6 @@
 import type { Script, ScriptSection } from "./types.js";
 
-const CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 function targetSections(length: string): {
   count: number;
@@ -35,63 +35,25 @@ function repairJson(raw: string): string {
   return s;
 }
 
-function normaliseScript(parsed: any): Script {
-  if (!parsed || typeof parsed !== "object") throw new Error("Script is not an object");
-  if (!Array.isArray(parsed.sections)) throw new Error("Script missing sections array");
-  if (parsed.sections.length < 4) throw new Error(`Too few sections: ${parsed.sections.length}`);
-
-  const seen = new Set<number>();
-  const cleaned: ScriptSection[] = [];
-
-  for (let i = 0; i < parsed.sections.length; i++) {
-    const s = parsed.sections[i];
-    if (!s || typeof s !== "object") continue;
-    const id = typeof s.id === "number" ? s.id : i + 1;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const isGraphic = s.section_type === "graphic";
-    cleaned.push({
-      id,
-      narration: isGraphic ? "" : String(s.narration || "").trim(),
-      visual_keywords: Array.isArray(s.visual_keywords)
-        ? s.visual_keywords.slice(0, 3).map(String)
-        : ["people walking street"],
-      section_type: ["intro", "broll", "stat", "graphic", "outro"].includes(s.section_type)
-        ? s.section_type
-        : "broll",
-      key_point: s.key_point ? String(s.key_point).slice(0, 60) : null,
-      estimated_words: Number(s.estimated_words) || 105,
-      sfx: Boolean(s.sfx),
-    });
-  }
-
-  if (cleaned.length < 4) throw new Error("Too few valid sections after dedup");
-
-  return {
-    title: String(parsed.title || "").trim(),
-    description: String(parsed.description || "").slice(0, 200),
-    mood: ["dramatic", "uplifting", "neutral", "tense"].includes(parsed.mood) ? parsed.mood : "neutral",
-    thumbnail_hook: String(parsed.thumbnail_hook || "").slice(0, 60),
-    sections: cleaned,
-  };
-}
-
-async function callCerebras(messages: { role: string; content: string }[]): Promise<string> {
-  const apiKey = process.env.CEREBRAS_API_KEY;
-  if (!apiKey) throw new Error("CEREBRAS_API_KEY env variable is not set");
+async function callGroq(messages: { role: string; content: string }[]): Promise<string> {
+  const apiKey = process.env.GROK_API_KEY || process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROK_API_KEY (or GROQ_API_KEY) environment variable is not set");
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000);
 
+  // Use llama-3.3-70b-versatile or mixtral-8x7b-32768 on Groq Cloud
+  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+
   try {
-    const response = await fetch(CEREBRAS_API_URL, {
+    const response = await fetch(GROQ_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "gpt-oss-120b",
+        model,
         max_tokens: 4096,
         temperature: 0.7,
         messages,
@@ -102,27 +64,25 @@ async function callCerebras(messages: { role: string; content: string }[]): Prom
     clearTimeout(timer);
 
     const responseText = await response.text();
-    console.log(`[cerebras] status: ${response.status}`);
-    console.log(`[cerebras] body preview: ${responseText.slice(0, 300)}`);
+    console.log(`[groq] status: ${response.status}`);
 
     if (!response.ok) {
-      throw new Error(`Cerebras API error ${response.status}: ${responseText}`);
+      throw new Error(`Groq API error ${response.status}: ${responseText}`);
     }
 
     const data = JSON.parse(responseText) as any;
     const choice = data.choices?.[0];
 
     if (choice?.finish_reason === "length") {
-      throw new Error(`Cerebras truncated response (finish_reason: length) — will retry with fewer words`);
+      throw new Error(`Groq truncated response (finish_reason: length) — will retry with fewer words`);
     }
 
     const content = (choice?.message?.content as string) || "";
-    console.log(`[cerebras] content length: ${content.length} chars`);
-    console.log(`[cerebras] content preview: ${content.slice(0, 200)}`);
+    console.log(`[groq] content length: ${content.length} chars`);
     return content || "{}";
   } catch (err: any) {
     clearTimeout(timer);
-    if (err?.name === "AbortError") throw new Error("Cerebras API timed out after 90s");
+    if (err?.name === "AbortError") throw new Error("Groq API timed out after 90s");
     throw err;
   }
 }
@@ -168,7 +128,7 @@ STRICT RULES:
   * NEVER use generic filler words. Every keyword must be specific to "${title}" and this section's narration.
 - Output ONLY the JSON array. No markdown, no explanation, no extra text.`;
 
-  const raw = await callCerebras([
+  const raw = await callGroq([
     { role: "system", content: "Output ONLY a valid JSON array. No markdown, no explanation, no preamble." },
     { role: "user", content: prompt },
   ]);
@@ -213,13 +173,13 @@ Output ONLY the JSON object.`;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const raw = await callCerebras([
+      const raw = await callGroq([
         { role: "system", content: "Output ONLY valid JSON, no markdown." },
         { role: "user", content: metaPrompt },
       ]);
       const repaired = repairJson(raw);
       meta = JSON.parse(repaired);
-      console.log("[cerebras] meta generated ok");
+      console.log("[groq] meta generated ok");
       break;
     } catch (err) {
       console.error(`Meta attempt ${attempt} failed:`, (err as Error).message);
@@ -243,7 +203,7 @@ Output ONLY the JSON object.`;
           title, startId, batchCount, adjustedWords, isFirst, isLast
         );
         allSections.push(...sections);
-        console.log(`[cerebras] batch ${startId}-${startId + batchCount - 1} ok (${sections.length} sections)`);
+        console.log(`[groq] batch ${startId}-${startId + batchCount - 1} ok (${sections.length} sections)`);
         break;
       } catch (err) {
         const msg = (err as Error).message;
