@@ -3,7 +3,8 @@ zerops:
     build:
       base: nodejs@22
       prepareCommands:
-        - sudo npm install -g pnpm@9.15.5
+        - corepack enable
+        - corepack prepare pnpm@9.15.5 --activate
       buildCommands:
         - pnpm install
         - pnpm run build
@@ -17,12 +18,12 @@ zerops:
     run:
       base: nodejs@22
       prepareCommands:
-        - sudo apk add ffmpeg ttf-dejavu
-        - sudo npm install -g tsx
+        - sudo apk update
+        - sudo apk add --no-cache ffmpeg ttf-dejavu
       ports:
         - port: 5000
           httpSupport: true
       envVariables:
         PORT: 5000
         NODE_ENV: production
-      start: tsx server/prod.ts
+      start: npx tsx server/prod.ts
