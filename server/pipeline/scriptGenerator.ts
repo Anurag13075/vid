@@ -42,8 +42,8 @@ async function callGroq(messages: { role: string; content: string }[]): Promise<
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000);
 
-  // Use llama-3.3-70b-versatile or mixtral-8x7b-32768 on Groq Cloud
-  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+  // Available on Groq Cloud: openai/gpt-oss-120b, openai/gpt-oss-20b, qwen/qwen3.8-27b
+  const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
   try {
     const response = await fetch(GROQ_API_URL, {
