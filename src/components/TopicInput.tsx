@@ -13,10 +13,10 @@ import {
 } from "lucide-react";
 
 const LENGTHS = [
-  {value :"very short", label: "3–5 min" },
-  { value: "short", label: "6–8 min" },
-  { value: "medium", label: "10–12 min" },
-  { value: "long", label: "15+ min" },
+  { value: "short", label: "4–5 min" },
+  { value: "medium", label: "6–8 min" },
+  { value: "long", label: "10–12 min" },
+  { value: "extended", label: "15+ min" },
 ] as const;
 
 const MODELS = ["Deep Video V1", "Cinematic V2 · Beta"] as const;

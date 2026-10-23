@@ -245,7 +245,7 @@ type AspectRatio = "16:9" | "9:16" | "21:9" | "1:1";
 export function ResultPage() {
   const { jobId } = Route.useParams();
   const navigate = useNavigate();
-  const { job: fetchedJob } = useJob(jobId);
+  const fetchedJob = useJob(jobId);
 
   const job =
     jobId === "demo" || jobId === "showcase" || !fetchedJob?.script
