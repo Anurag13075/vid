@@ -1,21 +1,18 @@
 FROM node:22-alpine
 
-# Install FFmpeg and required fonts on Alpine (lightweight: only ~35MB added)
+# Install FFmpeg and system fonts
 RUN apk add --no-cache ffmpeg ttf-dejavu
 
 WORKDIR /app
 
-# Disable pnpm minimum-release-age supply-chain quarantine check
-ENV PNPM_CONFIG_MINIMUM_RELEASE_AGE=0
+# Install stable pnpm v9 (LTS) - avoids pnpm 10 build script blocking
+RUN npm install -g pnpm@9.15.5
 
-# Enable pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-# Copy package manifests & npm config first for efficient docker caching
+# Copy package manifests & npm config first
 COPY package.json pnpm-lock.yaml* .npmrc* ./
 
-# Configure pnpm and install dependencies
-RUN pnpm config set minimum-release-age 0 && pnpm install
+# Install dependencies
+RUN pnpm install
 
 # Copy project source
 COPY . .

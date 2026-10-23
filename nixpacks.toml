@@ -1,2 +1,12 @@
+# Nixpacks configuration for Railway / Coolify / Zeabur
 [phases.setup]
-nixPkgs = ["nodejs_22", "nodePackages.pnpm", "ffmpeg", "python311", "python311Packages.pip"]
+nixPkgs = ["nodejs_22", "pnpm", "ffmpeg"]
+
+[phases.install]
+cmds = ["pnpm install"]
+
+[phases.build]
+cmds = ["pnpm run build"]
+
+[start]
+cmd = "npx tsx server/prod.ts"
