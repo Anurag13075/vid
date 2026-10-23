@@ -35,6 +35,8 @@ dist-ssr
 # Generated video/audio output
 server/data/
 *.mp4
+!public/*.mp4
+!data/videos/demo/final.mp4
 *.mp3
 *.wav
 !src/assets/*.jpg
