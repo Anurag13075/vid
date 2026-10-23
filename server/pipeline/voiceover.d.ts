@@ -1,5 +1,6 @@
 import type { ScriptSection } from "./types.js";
-export declare function getTempDir(subpath?: string): string;
+import { getTempDir } from "./tempDir.js";
+export { getTempDir };
 export declare const VOICES: {
     id: string;
     label: string;

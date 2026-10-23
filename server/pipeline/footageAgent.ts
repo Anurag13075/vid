@@ -5,13 +5,9 @@ import https from "https";
 import http from "http";
 import { createWriteStream } from "fs";
 import type { ScriptSection, Clip } from "./types.js";
+import { getTempDir } from "./tempDir.js";
 
 const CLIPS_PER_SECTION = 10;
-
-function getTempDir(subpath: string = ""): string {
-  const base = path.join(os.tmpdir(), "vidrush");
-  return subpath ? path.join(base, subpath) : base;
-}
 
 export function createClipTracker(): Set<string> {
   return new Set<string>();

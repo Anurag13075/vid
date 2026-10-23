@@ -1,14 +1,10 @@
 import { promises as fs } from "fs";
 import path from "path";
-import os from "os";
 import https from "https";
 import http from "http";
 import { createWriteStream } from "fs";
+import { getTempDir } from "./tempDir.js";
 const CLIPS_PER_SECTION = 10;
-function getTempDir(subpath = "") {
-    const base = path.join(os.tmpdir(), "vidrush");
-    return subpath ? path.join(base, subpath) : base;
-}
 export function createClipTracker() {
     return new Set();
 }

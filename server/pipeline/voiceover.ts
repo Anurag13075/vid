@@ -3,12 +3,9 @@ import path from "path";
 import os from "os";
 import type { ScriptSection } from "./types.js";
 import { ffmpeg, ffprobe } from "./ffmpeg.js";
+import { getTempDir } from "./tempDir.js";
 
-// Cross-platform temp directory
-export function getTempDir(subpath: string = ""): string {
-  const base = path.join(os.tmpdir(), "vidrush");
-  return subpath ? path.join(base, subpath) : base;
-}
+export { getTempDir };
 
 // ─── Voice catalogue ────────────────────────────────────────────────────────
 // Using official ElevenLabs premade voices (George, Adam) available across all plans

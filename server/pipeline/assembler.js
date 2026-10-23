@@ -1,11 +1,8 @@
 import { promises as fs } from "fs";
 import path from "path";
-import os from "os";
 import { ffmpeg, ffprobe } from "./ffmpeg.js";
-export function getTempDir(subpath = "") {
-    const base = path.join(os.tmpdir(), "vidrush");
-    return subpath ? path.join(base, subpath) : base;
-}
+import { getTempDir } from "./tempDir.js";
+export { getTempDir };
 // ─── Constants ───────────────────────────────────────────────────────────────
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
@@ -372,9 +369,16 @@ async function chainXfadeTransitions(clipPaths, clipDurations, outputPath, secti
         await concatClips(sl, out);
         sectionVids.push(out);
         sectionDurs.push(sd.reduce((a, b) => a + b, 0));
+        // Rolling cleanup: remove the raw cut clips for this section immediately to save gigabytes of space
+        for (const p of sl) {
+            await fs.unlink(p).catch(() => { });
+        }
     }
     if (sectionVids.length === 1) {
-        await fs.copyFile(sectionVids[0], outputPath);
+        if (sectionVids[0] !== outputPath) {
+            await fs.copyFile(sectionVids[0], outputPath);
+            await fs.unlink(sectionVids[0]).catch(() => { });
+        }
         return;
     }
     let cur = sectionVids, curD = sectionDurs, pass = 0;
@@ -387,11 +391,18 @@ async function chainXfadeTransitions(clipPaths, clipDurations, outputPath, secti
             nxt.push(bo);
             nD.push(bd.reduce((a, d) => a + d, 0) - (bc.length - 1) * TRANSITION_DURATION);
         }
+        // Delete intermediate files from the previous xfade pass
+        for (const f of cur) {
+            await fs.unlink(f).catch(() => { });
+        }
         cur = nxt;
         curD = nD;
         pass++;
     }
-    await fs.copyFile(cur[0], outputPath);
+    if (cur[0] !== outputPath) {
+        await fs.copyFile(cur[0], outputPath);
+        await fs.unlink(cur[0]).catch(() => { });
+    }
 }
 // ─── Merge voiceover ──────────────────────────────────────────────────────────
 async function mergeAudio(audioPaths, outputPath) {
@@ -481,6 +492,8 @@ async function finalMixWithCaptions(videoPath, voiceoverPath, bgmPath, assPath, 
     const tmpDir = path.dirname(videoPath);
     const pass1Out = path.join(tmpDir, "pass1_captioned.mp4");
     await upscaleAndBurnCaptions(videoPath, assPath, pass1Out);
+    // Free up intermediate transitioned video immediately
+    await fs.unlink(videoPath).catch(() => { });
     await overlayAndMixAudio(pass1Out, voiceoverPath, bgmPath, outputPath, videoTitle, sectionTimings, accentHex);
     await fs.unlink(pass1Out).catch(() => { });
 }
@@ -670,5 +683,9 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     await onProgress(6, total, RENDER_STEPS[6].label);
     const thumbPath = path.join(outputDir, "thumb.jpg");
     await extractThumbnail(finalMp4, thumbPath);
+    // Clean intermediate artifacts from tmpDir
+    await fs.unlink(mergedAudio).catch(() => { });
+    if (assExists)
+        await fs.unlink(assPath).catch(() => { });
     return { videoPath: finalMp4, thumbPath };
 }
