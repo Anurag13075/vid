@@ -55,6 +55,13 @@ export const ExportAction = z.object({
   resolution: z.enum(["1080p", "720p", "4k"]).default("1080p"),
 });
 
+export const NavigateAction = z.object({
+  type: z.literal("navigate"),
+  action: z.enum(["play", "pause", "toggle_playback", "jump_scene", "seek", "mute", "unmute"]).describe("Timeline or player control action"),
+  target_time_sec: z.number().optional().describe("Seconds to seek to in video"),
+  scene_index: z.number().int().optional().describe("1-based scene index to jump to"),
+});
+
 export const PipelineAction = z.discriminatedUnion("type", [
   CreateVideoAction,
   RewriteSceneAction,
@@ -65,6 +72,7 @@ export const PipelineAction = z.discriminatedUnion("type", [
   SetPacingAction,
   UndoAction,
   ExportAction,
+  NavigateAction,
 ]);
 
 export type PipelineActionType = z.infer<typeof PipelineAction>;
@@ -114,9 +122,10 @@ Your job is to analyze the user's natural language command and output a strictly
     // 7. { "type": "set_pacing", "speed": "fast"|"normal"|"slow" }
     // 8. { "type": "undo", "description": "revert previous change" }
     // 9. { "type": "export", "format": "mp4", "resolution": "1080p" }
+    // 10. { "type": "navigate", "action": "play"|"pause"|"toggle_playback"|"jump_scene"|"seek"|"mute"|"unmute", "scene_index": 2, "target_time_sec": 45 }
   ],
-  "requires_re_render": boolean,
-  "affected_scenes": [number] // 1-based indices of scenes modified (empty for global settings)
+  "requires_re_render": boolean, // false for navigate actions!
+  "affected_scenes": [number] // 1-based indices of scenes modified (empty for global settings or navigate)
 }
 
 CURRENT VIDEO STATE:
@@ -128,6 +137,7 @@ STRICT RULES:
 - If the user says "Make a video about X", output create_video with topic X.
 - If the user says "Change the background clips in scene 2 to sports cars", output replace_footage.
 - If the user says "Make scene 1 more energetic and punchy", output rewrite_scene.
+- If the user asks to play, pause, seek, jump to a scene or timestamp, output navigate (requires_re_render: false).
 `;
 
   const response = await fetch(GROQ_API_URL, {

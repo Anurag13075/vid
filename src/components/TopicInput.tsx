@@ -1,6 +1,16 @@
-import { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowUp, ChevronDown, Clock, Mic, Paperclip, Sparkles, Loader2, Link } from "lucide-react";
+import {
+  ArrowUp,
+  ChevronDown,
+  Clock,
+  Mic,
+  MicOff,
+  Sparkles,
+  Loader2,
+  Link as LinkIcon,
+  Zap,
+} from "lucide-react";
 
 const LENGTHS = [
   { value: "short", label: "6–8 min" },
@@ -18,7 +28,14 @@ const SUGGESTIONS = [
 ];
 
 interface TopicInputProps {
-  onSubmit?: (data: { topic: string; length: string; model: string; mode: "auto" | "manual"; prompt?: string; refLink?: string }) => void;
+  onSubmit?: (data: {
+    topic: string;
+    length: string;
+    model: string;
+    mode: "auto" | "manual";
+    prompt?: string;
+    refLink?: string;
+  }) => void;
 }
 
 export function TopicInput({ onSubmit }: TopicInputProps) {
@@ -30,6 +47,125 @@ export function TopicInput({ onSubmit }: TopicInputProps) {
   const [refLink, setRefLink] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Wispr Flow voice dictation state
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [voiceBadge, setVoiceBadge] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const speechRecognitionRef = useRef<any>(null);
+
+  const startVoiceDictation = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+
+      // Optional zero-latency interim speech recognition in browser
+      const SpeechRecognition =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        try {
+          const rec = new SpeechRecognition();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = "en-US";
+          rec.onresult = (e: any) => {
+            const current = Array.from(e.results)
+              .map((r: any) => r[0].transcript)
+              .join("");
+            if (current) setTopic(current);
+          };
+          rec.start();
+          speechRecognitionRef.current = rec;
+        } catch {}
+      }
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        if (speechRecognitionRef.current) {
+          try {
+            speechRecognitionRef.current.stop();
+          } catch {}
+          speechRecognitionRef.current = null;
+        }
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        stream.getTracks().forEach((track) => track.stop());
+        await processVoiceAudio(audioBlob, mimeType);
+      };
+
+      recorder.start(250);
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+      setVoiceBadge("Listening via Wispr Flow...");
+    } catch (err) {
+      console.error(err);
+      setError("Microphone permission required for Wispr Flow dictation");
+    }
+  };
+
+  const stopVoiceDictation = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      setTranscribing(true);
+      setVoiceBadge("Transcribing with Wispr Flow...");
+    }
+  };
+
+  const processVoiceAudio = async (blob: Blob, mimeType: string) => {
+    setTranscribing(true);
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(blob);
+      reader.onloadend = async () => {
+        const base64Data = (reader.result as string).split(",")[1];
+        const res = await fetch("/api/videos/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audioBase64: base64Data,
+            mimeType,
+            wisprApiKey:
+              typeof window !== "undefined"
+                ? localStorage.getItem("wispr_flow_api_key") || undefined
+                : undefined,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.text) {
+            setTopic(data.text);
+            setVoiceBadge("Dictated with Wispr Flow");
+            setTimeout(() => setVoiceBadge(null), 4000);
+
+            // Auto-detect settings from spoken thoughts
+            const lower = data.text.toLowerCase();
+            if (lower.includes("short") || lower.includes("6 min") || lower.includes("8 min")) {
+              setLength("short");
+            } else if (lower.includes("long") || lower.includes("15 min") || lower.includes("20 min")) {
+              setLength("long");
+            }
+            if (lower.includes("manual mode")) setMode("manual");
+            if (lower.includes("auto mode")) setMode("auto");
+          }
+        }
+        setTranscribing(false);
+      };
+    } catch {
+      setTranscribing(false);
+      setVoiceBadge(null);
+    }
+  };
 
   async function submit(t: string) {
     const final = t.trim();
@@ -72,6 +208,14 @@ export function TopicInput({ onSubmit }: TopicInputProps) {
               setLength(v);
             }}
           />
+
+          {voiceBadge && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-300 text-[11px] font-medium animate-pulse">
+              <Zap className="h-3 w-3 text-purple-400" />
+              <span>{voiceBadge}</span>
+            </div>
+          )}
+
           {/* Auto / Manual toggle */}
           <div className="ml-auto flex items-center rounded-lg bg-white/[0.04] border border-white/[0.06] overflow-hidden">
             <button
@@ -109,10 +253,15 @@ export function TopicInput({ onSubmit }: TopicInputProps) {
           <textarea
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
-            placeholder={mode === "manual" ? "Describe your video in detail — style, tone, structure..." : "Produce a long-form video about..."}
+            placeholder={
+              isRecording
+                ? "Listening with Wispr Flow... Speak naturally about your video idea..."
+                : mode === "manual"
+                ? "Describe your video in detail — style, tone, structure..."
+                : "Produce a long-form video about..."
+            }
             rows={mode === "manual" ? 4 : 2}
             className="flex-1 bg-transparent border-0 outline-none text-[17px] text-white placeholder:text-[#6a6a78] py-2 resize-none leading-snug"
-            
             disabled={submitting}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -121,6 +270,27 @@ export function TopicInput({ onSubmit }: TopicInputProps) {
               }
             }}
           />
+
+          {/* Wispr Flow Voice Dictation Button */}
+          <button
+            type="button"
+            onClick={isRecording ? stopVoiceDictation : startVoiceDictation}
+            className={`h-10 w-10 rounded-xl flex items-center justify-center transition-all ${
+              isRecording
+                ? "bg-rose-500 text-white shadow-lg shadow-rose-500/40 animate-pulse scale-105"
+                : "bg-white/10 hover:bg-white/20 text-white/80 hover:text-white"
+            }`}
+            title={isRecording ? "Stop dictating" : "Dictate video topic with Wispr Flow"}
+          >
+            {transcribing ? (
+              <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
+            ) : isRecording ? (
+              <MicOff className="h-4 w-4" />
+            ) : (
+              <Mic className="h-4 w-4 text-purple-400" />
+            )}
+          </button>
+
           <button
             type="submit"
             disabled={!topic.trim() || submitting}
@@ -139,7 +309,7 @@ export function TopicInput({ onSubmit }: TopicInputProps) {
         {mode === "manual" && (
           <div className="px-2 pb-2 pt-1 border-t border-white/[0.05] mt-1">
             <div className="flex items-center gap-2">
-              <Link className="h-3.5 w-3.5 text-[#6a6a78] shrink-0" />
+              <LinkIcon className="h-3.5 w-3.5 text-[#6a6a78] shrink-0" />
               <input
                 type="url"
                 value={refLink}

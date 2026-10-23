@@ -102,13 +102,13 @@ router.post("/command", async (req: Request, res: Response) => {
 // POST /api/videos/transcribe — Wispr Flow & Groq Whisper fallback audio transcription
 router.post("/transcribe", async (req: Request, res: Response) => {
   try {
-    const { audioBase64, language } = req.body;
+    const { audioBase64, language, wisprApiKey, mimeType } = req.body;
     if (!audioBase64) {
       return res.status(400).json({ error: "audioBase64 is required" });
     }
 
-    const wisprKey = process.env.WISPR_FLOW_API_KEY;
-    // 1. Try Wispr Flow API if key is available
+    const wisprKey = wisprApiKey || process.env.WISPR_FLOW_API_KEY;
+    // 1. Try Wispr Flow Voice Interface API if key is available
     if (wisprKey) {
       try {
         const wisprRes = await fetch("https://platform-api.wisprflow.ai/api/v1/dash/api", {
@@ -134,13 +134,15 @@ router.post("/transcribe", async (req: Request, res: Response) => {
       }
     }
 
-    // 2. Groq Whisper (lightning fast fallback using your existing groq key)
+    // 2. Groq Whisper (ultra low-latency fallback using Groq cloud)
     const groqKey = process.env.GROK_API_KEY || process.env.GROQ_API_KEY;
     if (groqKey) {
       const buffer = Buffer.from(audioBase64, "base64");
-      const blob = new Blob([buffer], { type: "audio/wav" });
+      const mime = mimeType || "audio/webm";
+      const ext = mime.includes("mp4") || mime.includes("m4a") ? "m4a" : mime.includes("wav") ? "wav" : "webm";
+      const blob = new Blob([buffer], { type: mime });
       const formData = new FormData();
-      formData.append("file", blob, "speech.wav");
+      formData.append("file", blob, `speech.${ext}`);
       formData.append("model", "whisper-large-v3-turbo");
 
       const groqWhisperRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {

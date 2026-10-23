@@ -113,6 +113,22 @@ export declare const ExportAction: z.ZodObject<{
     format?: "mp4" | "webm" | "audio_only" | undefined;
     resolution?: "1080p" | "720p" | "4k" | undefined;
 }>;
+export declare const NavigateAction: z.ZodObject<{
+    type: z.ZodLiteral<"navigate">;
+    action: z.ZodEnum<["play", "pause", "toggle_playback", "jump_scene", "seek", "mute", "unmute"]>;
+    target_time_sec: z.ZodOptional<z.ZodNumber>;
+    scene_index: z.ZodOptional<z.ZodNumber>;
+}, "strip", z.ZodTypeAny, {
+    type: "navigate";
+    action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+    scene_index?: number | undefined;
+    target_time_sec?: number | undefined;
+}, {
+    type: "navigate";
+    action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+    scene_index?: number | undefined;
+    target_time_sec?: number | undefined;
+}>;
 export declare const PipelineAction: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
     type: z.ZodLiteral<"create_video">;
     topic: z.ZodString;
@@ -218,6 +234,21 @@ export declare const PipelineAction: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
     type: "export";
     format?: "mp4" | "webm" | "audio_only" | undefined;
     resolution?: "1080p" | "720p" | "4k" | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"navigate">;
+    action: z.ZodEnum<["play", "pause", "toggle_playback", "jump_scene", "seek", "mute", "unmute"]>;
+    target_time_sec: z.ZodOptional<z.ZodNumber>;
+    scene_index: z.ZodOptional<z.ZodNumber>;
+}, "strip", z.ZodTypeAny, {
+    type: "navigate";
+    action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+    scene_index?: number | undefined;
+    target_time_sec?: number | undefined;
+}, {
+    type: "navigate";
+    action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+    scene_index?: number | undefined;
+    target_time_sec?: number | undefined;
 }>]>;
 export type PipelineActionType = z.infer<typeof PipelineAction>;
 export declare const CommandInterpretationResult: z.ZodObject<{
@@ -327,6 +358,21 @@ export declare const CommandInterpretationResult: z.ZodObject<{
         type: "export";
         format?: "mp4" | "webm" | "audio_only" | undefined;
         resolution?: "1080p" | "720p" | "4k" | undefined;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"navigate">;
+        action: z.ZodEnum<["play", "pause", "toggle_playback", "jump_scene", "seek", "mute", "unmute"]>;
+        target_time_sec: z.ZodOptional<z.ZodNumber>;
+        scene_index: z.ZodOptional<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        type: "navigate";
+        action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+        scene_index?: number | undefined;
+        target_time_sec?: number | undefined;
+    }, {
+        type: "navigate";
+        action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+        scene_index?: number | undefined;
+        target_time_sec?: number | undefined;
     }>]>, "many">;
     requires_re_render: z.ZodBoolean;
     affected_scenes: z.ZodArray<z.ZodNumber, "many">;
@@ -367,6 +413,11 @@ export declare const CommandInterpretationResult: z.ZodObject<{
         type: "export";
         format: "mp4" | "webm" | "audio_only";
         resolution: "1080p" | "720p" | "4k";
+    } | {
+        type: "navigate";
+        action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+        scene_index?: number | undefined;
+        target_time_sec?: number | undefined;
     })[];
     requires_re_render: boolean;
     affected_scenes: number[];
@@ -407,6 +458,11 @@ export declare const CommandInterpretationResult: z.ZodObject<{
         type: "export";
         format?: "mp4" | "webm" | "audio_only" | undefined;
         resolution?: "1080p" | "720p" | "4k" | undefined;
+    } | {
+        type: "navigate";
+        action: "pause" | "play" | "toggle_playback" | "jump_scene" | "seek" | "mute" | "unmute";
+        scene_index?: number | undefined;
+        target_time_sec?: number | undefined;
     })[];
     requires_re_render: boolean;
     affected_scenes: number[];

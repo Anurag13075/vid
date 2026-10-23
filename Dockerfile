@@ -5,14 +5,17 @@ RUN apk add --no-cache ffmpeg ttf-dejavu
 
 WORKDIR /app
 
+# Disable pnpm minimum-release-age supply-chain quarantine check
+ENV PNPM_CONFIG_MINIMUM_RELEASE_AGE=0
+
 # Enable pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Copy package manifests first for efficient docker caching
-COPY package.json pnpm-lock.yaml ./
+# Copy package manifests & npm config first for efficient docker caching
+COPY package.json pnpm-lock.yaml* .npmrc* ./
 
-# Install dependencies (only production & build tools)
-RUN pnpm install --frozen-lockfile
+# Configure pnpm and install dependencies
+RUN pnpm config set minimum-release-age 0 && pnpm install
 
 # Copy project source
 COPY . .

@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Logo } from "@/components/Logo";
 import { useJob } from "@/lib/usePipeline";
 import { VoiceCommandBar } from "@/components/VoiceCommandBar";
@@ -18,6 +18,7 @@ function ResultPage() {
   const job = useJob(jobId);
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"overview" | "script" | "clips">("overview");
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   if (!job) {
     return (
@@ -143,6 +144,8 @@ function ResultPage() {
         <div className="mb-8">
           <VoiceCommandBar
             videoId={jobId}
+            videoElement={videoRef.current}
+            sections={scriptData.sections}
             onActionExecuted={(res) => {
               if (res.execution?.newVideoId) {
                 navigate({ to: "/generate/$jobId", params: { jobId: res.execution.newVideoId } });
@@ -178,6 +181,7 @@ function ResultPage() {
 
         {/* Video player */}
         <video
+          ref={videoRef}
           key={videoUrl}
           src={videoUrl}
           controls
