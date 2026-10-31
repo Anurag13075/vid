@@ -16,7 +16,7 @@ router.post("/command", async (req, res) => {
         if (!command || typeof command !== "string" || !command.trim()) {
             return res.status(400).json({ error: "Voice command string is required" });
         }
-        // Load project state from Neon if videoId is provided
+        // Load project state from DB if videoId is provided
         let projectState = null;
         if (videoId) {
             const raw = await getVideo(videoId);
@@ -95,14 +95,14 @@ router.post("/transcribe", async (req, res) => {
         if (!audioBase64) {
             return res.status(400).json({ error: "audioBase64 is required" });
         }
-        const wisprKey = wisprApiKey || process.env.WISPR_FLOW_API_KEY;
+        const wisprKey = (wisprApiKey || process.env.WISPR_FLOW_API_KEY || "").trim();
         // 1. Try Wispr Flow Voice Interface API if key is available
         if (wisprKey) {
             try {
                 const wisprRes = await fetch("https://platform-api.wisprflow.ai/api/v1/dash/api", {
                     method: "POST",
                     headers: {
-                        "Authorization": `Bearer ${wisprKey}`,
+                        Authorization: `Bearer ${wisprKey}`,
                         "Content-Type": "application/json",
                     },
                     body: JSON.stringify({
@@ -112,7 +112,7 @@ router.post("/transcribe", async (req, res) => {
                     }),
                 });
                 if (wisprRes.ok) {
-                    const data = await wisprRes.json();
+                    const data = (await wisprRes.json());
                     const text = data.text || data.transcription || "";
                     return res.json({ text, provider: "wispr-flow" });
                 }
@@ -122,7 +122,7 @@ router.post("/transcribe", async (req, res) => {
             }
         }
         // 2. Groq Whisper (ultra low-latency fallback using Groq cloud)
-        const groqKey = process.env.GROK_API_KEY || process.env.GROQ_API_KEY;
+        const groqKey = (process.env.GROQ_API_KEY || process.env.GROK_API_KEY || "").trim();
         if (groqKey) {
             const buffer = Buffer.from(audioBase64, "base64");
             const mime = mimeType || "audio/webm";
@@ -133,11 +133,11 @@ router.post("/transcribe", async (req, res) => {
             formData.append("model", "whisper-large-v3-turbo");
             const groqWhisperRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
                 method: "POST",
-                headers: { "Authorization": `Bearer ${groqKey}` },
+                headers: { Authorization: `Bearer ${groqKey}` },
                 body: formData,
             });
             if (groqWhisperRes.ok) {
-                const groqData = await groqWhisperRes.json();
+                const groqData = (await groqWhisperRes.json());
                 return res.json({ text: groqData.text || "", provider: "groq-whisper" });
             }
         }
@@ -191,7 +191,8 @@ router.get("/", async (_req, res) => {
 // GET /api/videos/:id — get video status
 router.get("/:id", async (req, res) => {
     try {
-        const video = await getVideo(req.params.id);
+        const id = req.params.id;
+        const video = await getVideo(id);
         if (!video)
             return res.status(404).json({ error: "Not found" });
         const normalized = {

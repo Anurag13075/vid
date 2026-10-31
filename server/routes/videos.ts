@@ -20,7 +20,7 @@ router.post("/command", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Voice command string is required" });
     }
 
-    // Load project state from Neon if videoId is provided
+    // Load project state from DB if videoId is provided
     let projectState: any = null;
     if (videoId) {
       const raw = await getVideo(videoId);
@@ -107,14 +107,14 @@ router.post("/transcribe", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "audioBase64 is required" });
     }
 
-    const wisprKey = wisprApiKey || process.env.WISPR_FLOW_API_KEY;
+    const wisprKey = (wisprApiKey || process.env.WISPR_FLOW_API_KEY || "").trim();
     // 1. Try Wispr Flow Voice Interface API if key is available
     if (wisprKey) {
       try {
         const wisprRes = await fetch("https://platform-api.wisprflow.ai/api/v1/dash/api", {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${wisprKey}`,
+            Authorization: `Bearer ${wisprKey}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -125,7 +125,7 @@ router.post("/transcribe", async (req: Request, res: Response) => {
         });
 
         if (wisprRes.ok) {
-          const data = await wisprRes.json() as any;
+          const data = (await wisprRes.json()) as any;
           const text = data.text || data.transcription || "";
           return res.json({ text, provider: "wispr-flow" });
         }
@@ -135,7 +135,7 @@ router.post("/transcribe", async (req: Request, res: Response) => {
     }
 
     // 2. Groq Whisper (ultra low-latency fallback using Groq cloud)
-    const groqKey = process.env.GROK_API_KEY || process.env.GROQ_API_KEY;
+    const groqKey = (process.env.GROQ_API_KEY || process.env.GROK_API_KEY || "").trim();
     if (groqKey) {
       const buffer = Buffer.from(audioBase64, "base64");
       const mime = mimeType || "audio/webm";
@@ -147,12 +147,12 @@ router.post("/transcribe", async (req: Request, res: Response) => {
 
       const groqWhisperRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
         method: "POST",
-        headers: { "Authorization": `Bearer ${groqKey}` },
+        headers: { Authorization: `Bearer ${groqKey}` },
         body: formData,
       });
 
       if (groqWhisperRes.ok) {
-        const groqData = await groqWhisperRes.json() as any;
+        const groqData = (await groqWhisperRes.json()) as any;
         return res.json({ text: groqData.text || "", provider: "groq-whisper" });
       }
     }
@@ -212,59 +212,6 @@ router.get("/", async (_req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-
-    // Built-in Hackathon Showcase video: The-Complete-History-SnapYT.App.mp4
-    if (id === "demo" || id === "showcase") {
-      return res.json({
-        id,
-        title: "The Complete History: Secrets of the Ancient World",
-        voice: "Brian · Authoritative Male",
-        length: "medium",
-        theme: "cinematic",
-        background: "gradient_dark",
-        mode: "auto",
-        stage: "done",
-        progress: 100,
-        message: "Video updated and ready for YouTube export!",
-        script: {
-          title: "The Complete History: Secrets of the Ancient World",
-          description: "A comprehensive visual deep-dive exploring how ancient empires engineered monuments that survived millennia.",
-          mood: "epic_cinematic",
-          sections: [
-            { id: 1, section_type: "intro", title: "The Dawn of Empires", duration: 45, key_point: "Foundations of Civilization", narration: "Throughout human history, monumental achievements have risen from the sands of time, shaping the destiny of civilizations..." },
-            { id: 2, section_type: "scene_2", title: "Monuments of Eternity", duration: 50, key_point: "Colossal Engineering", narration: "From the colossal monoliths of Egypt to the aqueducts of Rome, engineering marvels defied the limitations of their era..." },
-            { id: 3, section_type: "scene_3", title: "Trade & Scientific Exchange", duration: 50, key_point: "Crossroads of Innovation", narration: "Trade routes connected distant corners of the world, fostering exchanges of science, philosophy, and astronomical discoveries..." },
-            { id: 4, section_type: "scene_4", title: "Rise & Fall of Powers", duration: 50, key_point: "Imperial Transformations", narration: "Yet with every golden age came periods of profound disruption. Conflicts and environmental shifts redrew the boundaries of empires..." },
-            { id: 5, section_type: "scene_5", title: "The Renaissance of Knowledge", duration: 50, key_point: "Golden Age Revival", narration: "Preserved manuscripts and newfound navigational tools ignited an unprecedented revival of art, medicine, and human curiosity..." },
-            { id: 6, section_type: "outro", title: "Echoes in the Modern World", duration: 45, key_point: "Timeless Legacy", narration: "Today, their legacy echoes through our modern cities, reminding us that every innovation stands on the shoulders of giants." }
-          ]
-        },
-        clips: Array.from({ length: 24 }).map((_, i) => ({
-          id: i + 1,
-          keyword: "cinematic ancient history architecture",
-          status: "ready",
-          duration: 12,
-          thumbUrl: "/videos/demo/thumb.jpg",
-          videoUrl: "/videos/demo/final.mp4",
-          source: i % 2 === 0 ? "pexels" : "pixabay",
-        })),
-        renderSteps: [
-          { id: "1", label: "Slicing sections into fast cuts", done: true },
-          { id: "2", label: "Pre-rendering cuts with cinematic color grade", done: true },
-          { id: "3", label: "Merging voiceover audio tracks", done: true },
-          { id: "4", label: "Generating karaoke captions (ASS format)", done: true },
-          { id: "5", label: "Chaining cuts with xfade transitions", done: true },
-          { id: "6", label: "Mixing audio + burning captions + overlays", done: true },
-          { id: "7", label: "Generating thumbnail", done: true }
-        ],
-        renderProgress: 100,
-        videoUrl: "/videos/demo/final.mp4",
-        thumbnailUrl: "/videos/demo/thumb.jpg",
-        durationSeconds: 290,
-        errorMessage: null,
-        createdAt: new Date().toISOString(),
-      });
-    }
 
     const video = await getVideo(id);
     if (!video) return res.status(404).json({ error: "Not found" });

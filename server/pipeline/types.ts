@@ -25,6 +25,8 @@ export interface Script {
   description: string;
   mood: "dramatic" | "uplifting" | "neutral" | "tense";
   thumbnail_hook: string;
+  sources?: string[];
+  tags?: string[];
   sections: ScriptSection[];
 }
 
@@ -33,12 +35,15 @@ export interface Clip {
   keyword: string;
   thumbUrl: string;
   videoUrl?: string;
-  source?: "pexels" | "pixabay";
+  source?: "pexels" | "pixabay" | "wikimedia" | "archive";
   externalId?: string;
   duration?: number;
   localPath?: string;
+  license?: string;
+  sourceUrl?: string;
   status: "pending" | "downloading" | "ready" | "failed" | "skipped";
 }
+
 export interface RenderStep {
   label: string;
   done: boolean;

@@ -71,9 +71,9 @@ export const CommandInterpretationResult = z.object({
 // ─── Groq Prompt & Interpretation Function ──────────────────────────────────
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 export async function interpretVoiceCommand(dictatedCommand, currentProjectState) {
-    const apiKey = process.env.GROK_API_KEY || process.env.GROQ_API_KEY;
+    const apiKey = (process.env.GROQ_API_KEY || process.env.GROK_API_KEY || "").trim();
     if (!apiKey)
-        throw new Error("GROK_API_KEY is not configured");
+        throw new Error("GROQ_API_KEY is not configured");
     const systemPrompt = `You are the AI Command Director for VidRush, an automated YouTube documentary video creator.
 The user speaks voice commands (transcribed via Wispr Flow dictation) to generate or edit video projects in real time.
 
@@ -108,14 +108,15 @@ STRICT RULES:
 - If the user says "Make scene 1 more energetic and punchy", output rewrite_scene.
 - If the user asks to play, pause, seek, jump to a scene or timestamp, output navigate (requires_re_render: false).
 `;
+    const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
     const response = await fetch(GROQ_API_URL, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`,
+            Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-            model: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
+            model,
             messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: dictatedCommand },
@@ -128,7 +129,7 @@ STRICT RULES:
         const errText = await response.text();
         throw new Error(`Groq interpretation error ${response.status}: ${errText}`);
     }
-    const data = await response.json();
+    const data = (await response.json());
     let raw = data.choices?.[0]?.message?.content || "{}";
     raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
     const parsed = JSON.parse(raw);

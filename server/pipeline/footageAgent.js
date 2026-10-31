@@ -4,7 +4,7 @@ import https from "https";
 import http from "http";
 import { createWriteStream } from "fs";
 import { getTempDir } from "./tempDir.js";
-const CLIPS_PER_SECTION = 10;
+const CLIPS_PER_SECTION = 6;
 export function createClipTracker() {
     return new Set();
 }
@@ -12,16 +12,17 @@ function pickBestPexelsFile(videoFiles) {
     const valid = (videoFiles || []).filter((f) => f?.link && f?.width);
     if (valid.length === 0)
         return "";
-    valid.sort((a, b) => Math.abs(a.width - 1280) - Math.abs(b.width - 1280));
+    // Prioritize 1080p full HD, then 720p
+    valid.sort((a, b) => Math.abs(a.width - 1920) - Math.abs(b.width - 1920));
     return valid[0].link;
 }
 function pickBestPixabayUrl(hit) {
-    return (hit?.videos?.medium?.url ||
+    return (hit?.videos?.large?.url ||
+        hit?.videos?.medium?.url ||
         hit?.videos?.small?.url ||
         hit?.videos?.tiny?.url ||
         "");
 }
-// Stop words to strip when building topic fallback keywords from user's title
 const STOP_WORDS = new Set([
     "from", "with", "that", "this", "your", "have", "will", "into", "they",
     "them", "then", "than", "when", "what", "which", "how", "for", "and",
@@ -29,65 +30,67 @@ const STOP_WORDS = new Set([
     "top", "best", "ways", "tips", "easy", "simple", "ultimate", "guide",
     "about", "some", "more", "very", "just", "been", "also", "over", "such",
 ]);
-// Keywords that return useless generic stock footage — skip them
 const BANNED_TERMS = [
     "cinematic", "background", "footage", "dramatic", "visual",
     "scene", "abstract", "generic", "video", "clip", "broll", "b-roll",
-    "nature", "landscape", "beautiful", "stunning",
 ];
 function sanitizeKeyword(kw) {
     const lower = kw.toLowerCase().trim();
-    if (lower.length < 4)
+    if (lower.length < 3)
         return "";
-    if (BANNED_TERMS.some(b => lower.includes(b)))
+    if (BANNED_TERMS.some((b) => lower === b))
         return "";
     return lower;
 }
-// Build topic-specific fallback keywords from the user's prompt title
 function buildTopicFallbacks(title, section) {
     const words = title
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, "")
         .split(/\s+/)
-        .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-    const coreWords = words.slice(0, 4).join(" ");
+        .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+    const coreWords = words.slice(0, 3).join(" ");
     const fallbacks = [];
     if (coreWords) {
         fallbacks.push(coreWords);
-        fallbacks.push(`${coreWords} close up`);
-        fallbacks.push(`${coreWords} tutorial`);
-        fallbacks.push(`${coreWords} demonstration`);
+        fallbacks.push(`${coreWords} historical`);
+        fallbacks.push(`${coreWords} aerial`);
     }
     if (section.key_point) {
-        const kp = section.key_point.toLowerCase().slice(0, 50);
-        if (kp.length > 4)
-            fallbacks.push(kp);
-    }
-    if (words.length >= 2) {
-        fallbacks.push(words.slice(0, 2).join(" "));
+        const kpWords = section.key_point
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, "")
+            .split(/\s+/)
+            .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
+            .slice(0, 3)
+            .join(" ");
+        if (kpWords.length > 3)
+            fallbacks.push(kpWords);
     }
     return fallbacks.filter(Boolean);
 }
 async function searchPexels(keyword, needed, usedIds) {
     const clips = [];
+    const apiKey = (process.env.PEXELS_API_KEY || "").trim();
+    if (!apiKey)
+        return clips;
     try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 12_000);
-        const response = await fetch(`https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=40&orientation=landscape&min_duration=4&max_duration=15`, {
-            headers: { Authorization: process.env.PEXELS_API_KEY || "" },
+        const response = await fetch(`https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=30&orientation=landscape&min_duration=3&max_duration=25`, {
+            headers: { Authorization: apiKey },
             signal: controller.signal,
         });
         clearTimeout(timer);
         if (!response.ok) {
-            console.warn(`Pexels "${keyword}": ${response.status}`);
+            console.warn(`[pexels] "${keyword}": HTTP ${response.status}`);
             return clips;
         }
         const data = (await response.json());
         const videos = (data.videos || [])
             .filter((v) => !usedIds.has(`pexels_${v.id}`))
             .sort((a, b) => {
-            const da = Math.abs((a.duration || 30) - 10);
-            const db = Math.abs((b.duration || 30) - 10);
+            const da = Math.abs((a.duration || 10) - 8);
+            const db = Math.abs((b.duration || 10) - 8);
             return da - db;
         });
         for (const video of videos) {
@@ -107,33 +110,32 @@ async function searchPexels(keyword, needed, usedIds) {
                 videoUrl,
                 source: "pexels",
                 externalId: idStr,
-                duration: video.duration || 10,
+                duration: video.duration || 8,
+                license: "Pexels License (Free to use)",
+                sourceUrl: video.url || `https://www.pexels.com/video/${video.id}/`,
                 status: "pending",
             });
         }
     }
     catch (err) {
-        if (err?.name === "AbortError") {
-            console.warn(`Pexels timed out: "${keyword}"`);
-        }
-        else {
-            console.error(`Pexels search error for "${keyword}":`, err);
+        if (err?.name !== "AbortError") {
+            console.warn(`[pexels] search error for "${keyword}":`, err.message);
         }
     }
     return clips;
 }
 async function searchPixabay(keyword, needed, usedIds) {
     const clips = [];
-    const apiKey = process.env.PIXABAY_API_KEY;
+    const apiKey = (process.env.PIXABAY_API_KEY || "").trim();
     if (!apiKey)
         return clips;
     try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 12_000);
-        const response = await fetch(`https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=40&video_type=film&orientation=horizontal&min_duration=4&max_duration=15`, { signal: controller.signal });
+        const response = await fetch(`https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=30&video_type=all&orientation=horizontal&min_duration=3&max_duration=25`, { signal: controller.signal });
         clearTimeout(timer);
         if (!response.ok) {
-            console.warn(`Pixabay "${keyword}": ${response.status}`);
+            console.warn(`[pixabay] "${keyword}": HTTP ${response.status}`);
             return clips;
         }
         const data = (await response.json());
@@ -150,21 +152,20 @@ async function searchPixabay(keyword, needed, usedIds) {
             clips.push({
                 id: hit.id,
                 keyword,
-                thumbUrl: hit.videos?.medium?.thumbnail || "",
+                thumbUrl: hit.videos?.medium?.thumbnail || hit.picture_id || "",
                 videoUrl,
                 source: "pixabay",
                 externalId: idStr,
-                duration: hit.duration || 10,
+                duration: hit.duration || 8,
+                license: "Pixabay Content License (Free for commercial use)",
+                sourceUrl: hit.pageURL || `https://pixabay.com/videos/id-${hit.id}/`,
                 status: "pending",
             });
         }
     }
     catch (err) {
-        if (err?.name === "AbortError") {
-            console.warn(`Pixabay timed out: "${keyword}"`);
-        }
-        else {
-            console.error(`Pixabay search error for "${keyword}":`, err);
+        if (err?.name !== "AbortError") {
+            console.warn(`[pixabay] search error for "${keyword}":`, err.message);
         }
     }
     return clips;
@@ -178,14 +179,14 @@ export async function findMultipleFootage(section, limit, videoId, usedIds, titl
     const keywordsToTry = cleanKeywords.length > 0
         ? cleanKeywords
         : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)];
-    // Phase 1: Pexels
+    // Phase 1: Pexels API
     for (const keyword of keywordsToTry) {
         if (clips.length >= clipsNeeded)
             break;
         const found = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
         clips.push(...found);
     }
-    // Phase 2: Pixabay
+    // Phase 2: Pixabay API
     if (clips.length < clipsNeeded) {
         for (const keyword of keywordsToTry) {
             if (clips.length >= clipsNeeded)
@@ -194,10 +195,9 @@ export async function findMultipleFootage(section, limit, videoId, usedIds, titl
             clips.push(...found);
         }
     }
-    // Phase 3: topic-derived fallback
+    // Phase 3: Broad topic-derived fallback searches
     if (clips.length < clipsNeeded) {
         const topicFallbacks = buildTopicFallbacks(title, section);
-        console.log(`[footage] Phase 3 fallback for "${keywordsToTry[0]}": trying topic keywords:`, topicFallbacks);
         for (const keyword of topicFallbacks) {
             if (clips.length >= clipsNeeded)
                 break;
@@ -209,17 +209,21 @@ export async function findMultipleFootage(section, limit, videoId, usedIds, titl
             }
         }
     }
-    console.log(`[footage] Section "${keywordsToTry[0]}": ${clips.length}/${clipsNeeded} clips found`);
+    console.log(`[footage] Section ${section.id} ("${keywordsToTry[0]}"): ${clips.length}/${clipsNeeded} clips found`);
     return clips;
 }
-// Resilient downloader with redirect handling and streaming
-function downloadUrlToFile(url, destPath, timeoutMs = 30000) {
+function downloadUrlToFile(url, destPath, timeoutMs = 35000) {
     return new Promise((resolve, reject) => {
         const fileStream = createWriteStream(destPath);
         const client = url.startsWith("https") ? https : http;
-        const request = client.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
-            // Handle HTTP redirects (301, 302, 307, 308)
-            if (res.statusCode && [301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        const request = client.get(url, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+        }, (res) => {
+            if (res.statusCode &&
+                [301, 302, 303, 307, 308].includes(res.statusCode) &&
+                res.headers.location) {
                 fileStream.close();
                 return downloadUrlToFile(res.headers.location, destPath, timeoutMs).then(resolve).catch(reject);
             }
@@ -263,7 +267,7 @@ export async function downloadClip(clip, videoId, suffix) {
         catch (err) {
             if (attempt === 3)
                 throw err;
-            await new Promise(r => setTimeout(r, 1000 * attempt));
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
         }
     }
     return outPath;
