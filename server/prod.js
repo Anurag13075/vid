@@ -10,6 +10,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
 import { jobQueue } from "./pipeline/queue.js";
+import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
 import videosRouter from "./routes/videos.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 5000);
@@ -61,22 +62,25 @@ app.get("/api/pipeline/:id/status", async (req, res) => {
             res.write(": ping\n\n");
         }
         catch { }
-    }, 15_000);
+    }, 15000);
     req.on("close", () => {
         clearInterval(keepAlive);
         unsub();
     });
 });
-app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
-// ── Static Files (dist) ────────────────────────────────────────────────────────
-const distPath = path.join(__dirname, "../dist");
+app.get("/api/health", (_req, res) => {
+    res.json({ ok: true, ts: Date.now() });
+});
+// ── Frontend SPA static serving ───────────────────────────────────────────────
+const distPath = path.join(__dirname, "../dist/public");
 app.use(express.static(distPath));
-// Fallback to index.html for React Router
+// Fallback for client-side routing
 app.get(/.*/, (req, res) => {
     res.sendFile(path.join(distPath, "index.html"));
 });
 // ── Boot ───────────────────────────────────────────────────────────────────────
 async function main() {
+    checkFFmpegCapabilities();
     await initDb();
     app.listen(PORT, "0.0.0.0", () => {
         console.log(`🚀 VidRush running on http://0.0.0.0:${PORT}`);

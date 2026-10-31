@@ -5,6 +5,7 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
+import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./pipeline/queue.js";
@@ -88,6 +89,7 @@ if (IS_PROD) {
 
 async function main() {
   try {
+    checkFFmpegCapabilities();
     await initDb();
     app.listen(PORT, () => {
       console.log(`🚀 VidRush server running on http://localhost:${PORT} [${IS_PROD ? "production" : "development"}]`);

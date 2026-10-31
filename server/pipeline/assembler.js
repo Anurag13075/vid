@@ -1,18 +1,37 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { ffmpeg, ffprobe } from "./ffmpeg.js";
+import { ffmpeg, getExactDuration, getFFmpegCapabilities } from "./ffmpeg.js";
 import { getTempDir } from "./tempDir.js";
 export { getTempDir };
 // ─── Constants ───────────────────────────────────────────────────────────────
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
 const FPS = 30;
-const CRF = 22; // High quality 1080p
+const CRF = 22; // Broadcast 1080p quality
 const PRESET = "fast";
 const THREADS = 0; // auto-detect cpu cores
 const CUT_TARGET_SEC = 4.0;
 const CUT_MIN_SEC = 2.5;
 const CUT_MAX_SEC = 6.0;
+const FONT_CANDIDATES = [
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+];
+async function resolveFont() {
+    for (const f of FONT_CANDIDATES) {
+        try {
+            await fs.access(f);
+            return f.replace(/\\/g, "/");
+        }
+        catch { }
+    }
+    return "";
+}
 const MOTION_CYCLE = [
     "zoom-in", "pan-right", "zoom-out", "pan-left",
     "zoom-in", "pan-up", "zoom-out", "pan-down",
@@ -41,6 +60,40 @@ const THEME_CONFIGS = {
 };
 function resolveTheme(theme) {
     return THEME_CONFIGS[theme ?? ""] ?? THEME_CONFIGS.standard;
+}
+// ─── Drawtext Escape & Text Wrapping ─────────────────────────────────────────
+function escapeDrawtext(text) {
+    return text
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/:/g, "\\:")
+        .replace(/%/g, "%%")
+        .replace(/\[/g, "\\[")
+        .replace(/\]/g, "\\]")
+        .replace(/,/g, "\\,")
+        .replace(/;/g, "\\;")
+        .slice(0, 90);
+}
+function wrapText(text, maxChars) {
+    const words = text.trim().split(/\s+/);
+    const lines = [];
+    let current = "";
+    for (const word of words) {
+        if (!current) {
+            current = word;
+            continue;
+        }
+        if ((current + " " + word).length <= maxChars) {
+            current += " " + word;
+        }
+        else {
+            lines.push(current);
+            current = word;
+        }
+    }
+    if (current)
+        lines.push(current);
+    return lines;
 }
 // ─── ASS SubStation Alpha Helpers ───────────────────────────────────────────
 function assTime(seconds) {
@@ -96,10 +149,8 @@ function buildKenBurnsFilter(motion, durationSec) {
             return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*(1-${prog})'`;
     }
 }
-// ─── Render One Cut (Native 1080p, Uniform GOP & Timebase) ──────────────────
+// ─── Render One Cut (Stream Loop Enabled to Prevent Duration Truncation) ────
 async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter, isSectionStart = false, isSectionEnd = false) {
-    const clipDuration = await ffprobe(clipPath);
-    const needsLoop = clipDuration < durationSec;
     let transitionFilter = "";
     if (isSectionStart && durationSec > 1.2) {
         transitionFilter = ",fade=t=in:st=0:d=0.30";
@@ -108,8 +159,9 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
         transitionFilter = `,fade=t=out:st=${(durationSec - 0.30).toFixed(2)}:d=0.30`;
     }
     const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)},${gradeFilter}${transitionFilter},format=yuv420p`;
+    // Always pass -stream_loop -1 so that clips shorter than durationSec never terminate early
     await ffmpeg([
-        ...(needsLoop ? ["-stream_loop", "-1"] : []),
+        "-stream_loop", "-1",
         "-i", clipPath,
         "-vf", fullFilter,
         "-t", durationSec.toFixed(3),
@@ -136,7 +188,7 @@ async function makeDarkSceneClip(outPath, durationSec) {
         "-an", "-y", outPath,
     ]);
 }
-// ─── Cut Slicer (Ensures Cuts Match Audio Exactly) ───────────────────────────
+// ─── Cut Slicer (Ensures Cuts Sum Exactly to Audio Track Duration) ───────────
 function sliceCuts(audioDuration) {
     if (audioDuration <= CUT_MAX_SEC)
         return [audioDuration];
@@ -158,9 +210,75 @@ function sliceCuts(audioDuration) {
     }
     return cuts;
 }
-// ─── Complete ASS Subtitles + Title + Stats + Badges Generator ──────────────
-// Uses 100% ASS formatting — ZERO reliance on external drawtext filter!
-async function generateAssKaraokeAndOverlays(videoTitle, sections, sectionTimings, audioPaths, assPath, accentHex) {
+// ─── Build Drawtext & Drawbox Overlay Filters ────────────────────────────────
+function buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font) {
+    const filters = [];
+    const ff = font ? `fontfile='${font}':` : "";
+    const accentRGB = `0x${accentHex.replace("#", "")}`;
+    // Title Card Overlay at start
+    if (videoTitle.trim()) {
+        const titleLine = escapeDrawtext(wrapText(videoTitle, 38)[0] ?? videoTitle.slice(0, 60));
+        const alpha = `if(lt(t\\,0.5)\\,t/0.5\\,if(gt(t\\,3.0)\\,(3.5-t)/0.5\\,1))`;
+        filters.push(`drawtext=${ff}text='${titleLine}':fontsize=60:fontcolor=white@1.0:` +
+            `x=(w-tw)/2:y=h/2-th-24:` +
+            `box=1:boxcolor=0x000000BB:boxborderw=30:` +
+            `borderw=2:bordercolor=black@0.9:` +
+            `alpha='${alpha}':enable='between(t\\,0\\,3.5)'`);
+        filters.push(`drawbox=x=(iw-600)/2:y=ih/2+4:w=600:h=4:color=${accentRGB}:t=fill:` +
+            `enable='between(t\\,0.4\\,3.5)'`);
+    }
+    // Stat / Key Fact Callout Cards
+    for (const t of sectionTimings) {
+        if (t.sectionType !== "stat" || !t.keyPoint)
+            continue;
+        const dur = t.endSec - t.startSec;
+        if (dur < 1.0)
+            continue;
+        const showStart = t.startSec + 0.5;
+        const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.3);
+        if (showEnd <= showStart)
+            continue;
+        const lines = wrapText(t.keyPoint, 34).slice(0, 2);
+        const alpha = `if(lt(t\\,${(showStart + 0.3).toFixed(2)})\\,(t-${showStart.toFixed(2)})/0.3\\,if(gt(t\\,${(showEnd - 0.3).toFixed(2)})\\,(${showEnd.toFixed(2)}-t)/0.3\\,1))`;
+        const boxH = lines.length * 72 + 44;
+        const boxW = 900;
+        const boxX = (OUTPUT_WIDTH - boxW) / 2;
+        const boxY = (OUTPUT_HEIGHT - boxH) / 2 - 30;
+        filters.push(`drawbox=x=${boxX.toFixed(0)}:y=${boxY.toFixed(0)}:w=${boxW}:h=${boxH}:color=0x000000CC:t=fill:` +
+            `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`);
+        filters.push(`drawbox=x=${boxX.toFixed(0)}:y=${boxY.toFixed(0)}:w=${boxW}:h=5:color=${accentRGB}:t=fill:` +
+            `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`);
+        lines.forEach((line, li) => {
+            const esc = escapeDrawtext(line);
+            const yPos = (OUTPUT_HEIGHT / 2 - lines.length * 36 + li * 72 - 18).toFixed(0);
+            filters.push(`drawtext=${ff}text='${esc}':fontsize=54:fontcolor=white@1.0:` +
+                `x=(w-tw)/2:y=${yPos}:` +
+                `borderw=3:bordercolor=black@0.9:` +
+                `alpha='${alpha}':enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`);
+        });
+    }
+    // Section Chapter Markers (Intro / Outro)
+    for (const t of sectionTimings) {
+        if (t.sectionType !== "intro" && t.sectionType !== "outro")
+            continue;
+        const isIntro = t.sectionType === "intro";
+        const showStart = isIntro ? Math.max(t.startSec, 4.0) : t.startSec + 0.3;
+        const showEnd = Math.min(showStart + 3.5, t.endSec - 0.3);
+        if (showEnd <= showStart)
+            continue;
+        const label = escapeDrawtext(isIntro ? "Introduction" : "Conclusion");
+        const alpha = `if(lt(t\\,${(showStart + 0.4).toFixed(2)})\\,(t-${showStart.toFixed(2)})/0.4\\,if(gt(t\\,${(showEnd - 0.4).toFixed(2)})\\,(${showEnd.toFixed(2)}-t)/0.4\\,1))`;
+        filters.push(`drawbox=x=72:y=${OUTPUT_HEIGHT - 138}:w=240:h=44:color=${accentRGB}CC:t=fill:` +
+            `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`);
+        filters.push(`drawtext=${ff}text='${label}':fontsize=24:fontcolor=white@1.0:` +
+            `x=90:y=${OUTPUT_HEIGHT - 128}:` +
+            `borderw=1:bordercolor=black@0.6:` +
+            `alpha='${alpha}':enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`);
+    }
+    return filters;
+}
+// ─── ASS Subtitles & Karaoke Generator ───────────────────────────────────────
+async function generateAssKaraoke(sections, sectionTimings, audioPaths, assPath, accentHex, includeOverlayFallbacks = false, videoTitle = "") {
     const accentColor = hexToAss(accentHex, 0);
     const white = "&H00FFFFFF";
     const gray = "&H00D0D0D0";
@@ -168,38 +286,36 @@ async function generateAssKaraokeAndOverlays(videoTitle, sections, sectionTiming
     const shadowBox = "&HB0000000";
     const cardBox = "&HD810141C";
     let events = "";
-    // 1. Title Card at Opening (t = 0.5s to 4.2s)
-    if (videoTitle.trim()) {
-        const cleanTitle = escapeAss(videoTitle.length > 55 ? videoTitle.slice(0, 52) + "..." : videoTitle);
-        events += `Dialogue: 3,0:00:00.40,0:00:04.20,TitleCard,,0,0,0,,{\\fad(400,400)}${cleanTitle}\n`;
-        events += `Dialogue: 4,0:00:00.60,0:00:04.20,TitleBadge,,0,0,0,,{\\fad(300,400)}━ DOCUMENTARY INVESTIGATION ━\n`;
-    }
-    // 2. Section Chapter Badges & Key Point Callouts
-    for (const t of sectionTimings) {
-        const dur = t.endSec - t.startSec;
-        if (dur < 1.2)
-            continue;
-        // Stat / Key Fact Callout
-        if ((t.sectionType === "stat" || t.keyPoint) && t.keyPoint) {
-            const showStart = t.startSec + 0.8;
-            const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.4);
-            if (showEnd > showStart + 1.0) {
-                const cleanKp = escapeAss(t.keyPoint);
-                events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(300,300)}◆ ${cleanKp}\n`;
-            }
+    // If drawtext is not available on current build, ASS renders the overlays seamlessly
+    if (includeOverlayFallbacks) {
+        if (videoTitle.trim()) {
+            const cleanTitle = escapeAss(videoTitle.length > 55 ? videoTitle.slice(0, 52) + "..." : videoTitle);
+            events += `Dialogue: 3,0:00:00.40,0:00:04.20,TitleCard,,0,0,0,,{\\fad(400,400)}${cleanTitle}\n`;
+            events += `Dialogue: 4,0:00:00.60,0:00:04.20,TitleBadge,,0,0,0,,{\\fad(300,400)}━ DOCUMENTARY INVESTIGATION ━\n`;
         }
-        // Chapter Marker for Intro / Outro
-        if (t.sectionType === "intro" || t.sectionType === "outro") {
-            const isIntro = t.sectionType === "intro";
-            const showStart = isIntro ? Math.max(t.startSec + 4.5, 4.5) : t.startSec + 0.4;
-            const showEnd = Math.min(showStart + 3.8, t.endSec - 0.3);
-            if (showEnd > showStart + 1.0) {
-                const badgeLabel = isIntro ? "PROLOGUE" : "CONCLUSION";
-                events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},ChapterTag,,0,0,0,,{\\fad(300,300)}[ ${badgeLabel} ]\n`;
+        for (const t of sectionTimings) {
+            const dur = t.endSec - t.startSec;
+            if (dur < 1.2)
+                continue;
+            if ((t.sectionType === "stat" || t.keyPoint) && t.keyPoint) {
+                const showStart = t.startSec + 0.8;
+                const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.4);
+                if (showEnd > showStart + 1.0) {
+                    events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(300,300)}◆ ${escapeAss(t.keyPoint)}\n`;
+                }
+            }
+            if (t.sectionType === "intro" || t.sectionType === "outro") {
+                const isIntro = t.sectionType === "intro";
+                const showStart = isIntro ? Math.max(t.startSec + 4.5, 4.5) : t.startSec + 0.4;
+                const showEnd = Math.min(showStart + 3.8, t.endSec - 0.3);
+                if (showEnd > showStart + 1.0) {
+                    const badgeLabel = isIntro ? "PROLOGUE" : "CONCLUSION";
+                    events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},ChapterTag,,0,0,0,,{\\fad(300,300)}[ ${badgeLabel} ]\n`;
+                }
             }
         }
     }
-    // 3. Word-by-Word Timed Karaoke Captions
+    // Word-by-Word Timed Karaoke Subtitles
     const WORDS_PER_LINE = 4;
     let timeOffset = 0;
     for (let i = 0; i < sections.length; i++) {
@@ -207,7 +323,7 @@ async function generateAssKaraokeAndOverlays(videoTitle, sections, sectionTiming
         const audioPath = audioPaths[i];
         if (!audioPath || !section.narration.trim())
             continue;
-        const duration = await ffprobe(audioPath);
+        const duration = await getExactDuration(audioPath);
         if (duration <= 0)
             continue;
         const words = section.narration.trim().split(/\s+/).filter(Boolean);
@@ -268,7 +384,6 @@ async function joinAllCuts(clipPaths, outputPath) {
     const lines = clipPaths.map((p) => `file '${p.replace(/\\/g, "/")}'`).join("\n");
     await fs.writeFile(listPath, lines, "utf8");
     console.log(`[assembler] joining ${clipPaths.length} cuts into single stream`);
-    // Concat demuxer with timestamp sanitization
     await ffmpeg([
         "-f", "concat",
         "-safe", "0",
@@ -310,26 +425,35 @@ async function mergeAudio(audioPaths, outputPath) {
         "-y", outputPath,
     ]);
 }
-// ─── Single-Pass Final Production Mix (Zero Drawtext Error) ─────────────────
-async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, outputPath) {
-    let vfFilter = "format=yuv420p";
-    if (assPath) {
-        try {
-            await fs.access(assPath);
-            const content = await fs.readFile(assPath, "utf8");
-            if (content.includes("[Events]")) {
-                const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-                vfFilter = `ass='${escaped}',format=yuv420p`;
-            }
-        }
-        catch {
-            console.warn("[assembler] ASS subtitle file not found, proceeding without subtitles");
+// ─── Final Production Mix (Drawtext + Drawbox + ASS Subtitles) ───────────────
+async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, outputPath, videoTitle, sectionTimings, accentHex) {
+    const caps = getFFmpegCapabilities();
+    const font = await resolveFont();
+    const vfFilters = [];
+    // Use drawtext and drawbox if available in the verified FFmpeg build
+    if (caps.hasDrawtext && caps.hasDrawbox) {
+        console.log("[assembler] Applying drawtext and drawbox overlays");
+        const drawtextFilters = buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font);
+        if (drawtextFilters.length > 0) {
+            vfFilters.push(...drawtextFilters);
         }
     }
+    // Apply ASS subtitle stream
+    if (assPath) {
+        try {
+            if (fs.existsSync(assPath)) {
+                const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+                vfFilters.push(`ass='${escaped}'`);
+            }
+        }
+        catch { }
+    }
+    vfFilters.push("format=yuv420p");
+    const videoFilterStr = vfFilters.join(",");
     const hasBgm = bgmPath && (await fs.stat(bgmPath).catch(() => null))?.size;
-    console.log(`[assembler] Final render pass (1080p, CRF ${CRF}, ASS overlays, BGM=${!!hasBgm})`);
+    console.log(`[assembler] Final render pass: drawtext=${caps.hasDrawtext}, ass=${caps.hasAss}, BGM=${!!hasBgm}`);
     if (hasBgm) {
-        const voDur = await ffprobe(voiceoverPath);
+        const voDur = await getExactDuration(voiceoverPath);
         const fadeOutStart = Math.max(voDur - 2.5, 0);
         await ffmpeg([
             "-i", videoPath,
@@ -340,7 +464,7 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
                 `[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
             ].join(";"),
             "-map", "0:v", "-map", "[audio]",
-            "-vf", vfFilter,
+            "-vf", videoFilterStr,
             "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
@@ -354,7 +478,7 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
             "-i", voiceoverPath,
             "-filter_complex", `[1:a]loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
             "-map", "0:v", "-map", "[audio]",
-            "-vf", vfFilter,
+            "-vf", videoFilterStr,
             "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
@@ -410,7 +534,8 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     await fs.mkdir(tmpDir, { recursive: true });
     await fs.mkdir(outputDir, { recursive: true });
     const { gradeFilter, captionAccent } = resolveTheme(theme);
-    console.log(`[assembler] Starting assemble: theme="${theme ?? "standard"}" accent="${captionAccent}"`);
+    const caps = getFFmpegCapabilities();
+    console.log(`[assembler] Starting assemble: theme="${theme ?? "standard"}" drawtext=${caps.hasDrawtext}`);
     const total = RENDER_STEPS.length;
     // Build global clip pool
     const globalPool = [];
@@ -436,7 +561,8 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
             cutPlan.push([]);
             continue;
         }
-        const dur = await ffprobe(ap);
+        // Measure exact audio duration with sample-accurate decoder
+        const dur = await getExactDuration(ap);
         if (dur <= 0) {
             cutPlan.push([]);
             continue;
@@ -500,9 +626,10 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     const assPath = path.join(tmpDir, "subtitles.ass");
     let assExists = false;
     try {
-        await generateAssKaraokeAndOverlays(videoTitle, sections, sectionTimings, audioPaths, assPath, captionAccent);
+        await generateAssKaraoke(sections, sectionTimings, audioPaths, assPath, captionAccent, !caps.hasDrawtext, // Include fallback overlays if drawtext is not available
+        videoTitle);
         assExists = (await fs.stat(assPath)).size > 0;
-        console.log(`[assembler] Generated ASS graphics and subtitles file`);
+        console.log(`[assembler] Generated ASS subtitles file`);
     }
     catch (err) {
         console.warn("[assembler] ASS subtitle generation error:", err.message);
@@ -511,10 +638,29 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     await onProgress(4, total, RENDER_STEPS[4].label);
     const joinedVideo = path.join(tmpDir, "timeline_joined.mp4");
     await joinAllCuts(renderedCuts, joinedVideo);
+    // ── Sync Verification: Guarantee Video Duration Matches Audio Exactly ────
+    const audioDuration = await getExactDuration(mergedAudio);
+    const videoDuration = await getExactDuration(joinedVideo);
+    console.log(`[assembler] Sync verification: Video=${videoDuration.toFixed(2)}s, Audio=${audioDuration.toFixed(2)}s`);
+    let syncedVideo = joinedVideo;
+    if (videoDuration < audioDuration - 0.25) {
+        const deficit = audioDuration - videoDuration;
+        console.log(`[assembler] Video is shorter than audio by ${deficit.toFixed(2)}s. Padding video with last frame to sync.`);
+        const paddedVideo = path.join(tmpDir, "timeline_padded.mp4");
+        await ffmpeg([
+            "-i", joinedVideo,
+            "-vf", `tpad=stop_mode=clone:stop_duration=${deficit.toFixed(3)}`,
+            "-c:v", "libx264", "-crf", String(CRF), "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-r", String(FPS),
+            "-y", paddedVideo,
+        ]);
+        syncedVideo = paddedVideo;
+    }
     // ── Step 6: Master Audio & Final Video Render ─────────────────────────────
     await onProgress(5, total, RENDER_STEPS[5].label);
     const finalMp4 = path.join(outputDir, "final.mp4");
-    await finalProductionMix(joinedVideo, mergedAudio, bgmPath, assExists ? assPath : null, finalMp4);
+    await finalProductionMix(syncedVideo, mergedAudio, bgmPath, assExists ? assPath : null, finalMp4, videoTitle, sectionTimings, captionAccent);
     // ── Step 7: Thumbnail Extraction ──────────────────────────────────────────
     await onProgress(6, total, RENDER_STEPS[6].label);
     const thumbPath = path.join(outputDir, "thumb.jpg");
@@ -524,6 +670,9 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
         await fs.unlink(cut).catch(() => { });
     }
     await fs.unlink(joinedVideo).catch(() => { });
+    if (syncedVideo !== joinedVideo) {
+        await fs.unlink(syncedVideo).catch(() => { });
+    }
     await fs.unlink(mergedAudio).catch(() => { });
     if (assExists)
         await fs.unlink(assPath).catch(() => { });
