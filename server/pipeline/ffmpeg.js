@@ -37,12 +37,29 @@ export function probeBinaryCapabilities(binPath) {
                 result.filters.add(match[1].toLowerCase());
             }
         }
-        // Explicit filter flags
-        result.hasDrawtext = result.filters.has("drawtext") || /\bdrawtext\b/i.test(filtersOutput);
-        result.hasDrawbox = result.filters.has("drawbox") || /\bdrawbox\b/i.test(filtersOutput);
-        result.hasOverlay = result.filters.has("overlay") || /\boverlay\b/i.test(filtersOutput);
-        result.hasAss = result.filters.has("ass") || /\bass\b/i.test(filtersOutput);
-        result.hasLoudnorm = result.filters.has("loudnorm") || /\bloudnorm\b/i.test(filtersOutput);
+        // Explicit filter verification
+        // Note: static Linux ffmpeg-static builds disable fontconfig, omitting drawtext
+        const isFfmpegStatic = binPath.toLowerCase().includes("ffmpeg-static");
+        if (isFfmpegStatic) {
+            result.hasDrawtext = false;
+        } else if (result.filters.has("drawtext")) {
+            try {
+                const testRes = spawnSync(
+                    binPath,
+                    ["-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.04", "-vf", "drawtext=text='test'", "-f", "null", "-"],
+                    { timeout: 3000 }
+                );
+                result.hasDrawtext = testRes.status === 0;
+            } catch {
+                result.hasDrawtext = false;
+            }
+        } else {
+            result.hasDrawtext = false;
+        }
+        result.hasDrawbox = result.filters.has("drawbox");
+        result.hasOverlay = result.filters.has("overlay");
+        result.hasAss = result.filters.has("ass");
+        result.hasLoudnorm = result.filters.has("loudnorm");
     }
     catch (err) {
         console.warn(`[ffmpeg] Could not probe binary "${binPath}":`, err.message);

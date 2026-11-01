@@ -356,7 +356,7 @@ async function generateAssKaraoke(
   audioPaths: (string | null)[],
   assPath: string,
   accentHex: string,
-  includeOverlayFallbacks = false,
+  includeOverlayFallbacks = true,
   videoTitle = ""
 ): Promise<void> {
   const accentColor = hexToAss(accentHex, 0);
@@ -550,23 +550,23 @@ async function finalProductionMix(
 
   const vfFilters: string[] = [];
 
-  // Use drawtext and drawbox if available in the verified FFmpeg build
-  if (caps.hasDrawtext && caps.hasDrawbox) {
-    console.log("[assembler] Applying drawtext and drawbox overlays");
-    const drawtextFilters = buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font);
-    if (drawtextFilters.length > 0) {
-      vfFilters.push(...drawtextFilters);
-    }
-  }
-
-  // Apply ASS subtitle stream
+  // Primary: Apply ASS subtitle & graphics stream (TitleCard, TitleBadge, StatCard, ChapterTag, Karaoke)
+  // libass is compiled in all static and dynamic builds (--enable-libass), completely avoiding drawtext filtergraph crashes
   if (assPath) {
     try {
       if (fs.existsSync(assPath)) {
         const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
         vfFilters.push(`ass='${escaped}'`);
+        console.log("[assembler] Applied broadcast ASS subtitles & overlays stream");
       }
     } catch {}
+  } else if (caps.hasDrawtext && caps.hasDrawbox) {
+    // Secondary fallback only if ASS is not available
+    console.log("[assembler] Applying drawtext and drawbox overlays (ASS unavailable)");
+    const drawtextFilters = buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font);
+    if (drawtextFilters.length > 0) {
+      vfFilters.push(...drawtextFilters);
+    }
   }
 
   vfFilters.push("format=yuv420p");
@@ -814,7 +814,7 @@ export async function assemble(
       audioPaths,
       assPath,
       captionAccent,
-      !caps.hasDrawtext, // Include fallback overlays if drawtext is not available
+      true, // Always include title card, badges, stat cards, and chapter markers in ASS
       videoTitle
     );
     assExists = (await fs.stat(assPath)).size > 0;

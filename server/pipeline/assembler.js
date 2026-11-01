@@ -430,23 +430,25 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
     const caps = getFFmpegCapabilities();
     const font = await resolveFont();
     const vfFilters = [];
-    // Use drawtext and drawbox if available in the verified FFmpeg build
-    if (caps.hasDrawtext && caps.hasDrawbox) {
-        console.log("[assembler] Applying drawtext and drawbox overlays");
-        const drawtextFilters = buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font);
-        if (drawtextFilters.length > 0) {
-            vfFilters.push(...drawtextFilters);
-        }
-    }
-    // Apply ASS subtitle stream
+    // Primary: Apply ASS subtitle & graphics stream (TitleCard, TitleBadge, StatCard, ChapterTag, Karaoke)
+    // libass is compiled in all static and dynamic builds (--enable-libass), completely avoiding drawtext filtergraph crashes
     if (assPath) {
         try {
             if (fs.existsSync(assPath)) {
                 const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
                 vfFilters.push(`ass='${escaped}'`);
+                console.log("[assembler] Applied broadcast ASS subtitles & overlays stream");
             }
         }
         catch { }
+    }
+    else if (caps.hasDrawtext && caps.hasDrawbox) {
+        // Secondary fallback only if ASS is not available
+        console.log("[assembler] Applying drawtext and drawbox overlays (ASS unavailable)");
+        const drawtextFilters = buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font);
+        if (drawtextFilters.length > 0) {
+            vfFilters.push(...drawtextFilters);
+        }
     }
     vfFilters.push("format=yuv420p");
     const videoFilterStr = vfFilters.join(",");
@@ -644,7 +646,7 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     const assPath = path.join(tmpDir, "subtitles.ass");
     let assExists = false;
     try {
-        await generateAssKaraoke(sections, sectionTimings, audioPaths, assPath, captionAccent, !caps.hasDrawtext, // Include fallback overlays if drawtext is not available
+        await generateAssKaraoke(sections, sectionTimings, audioPaths, assPath, captionAccent, true, // Always include title card, badges, stat cards, and chapter markers in ASS
         videoTitle);
         assExists = (await fs.stat(assPath)).size > 0;
         console.log(`[assembler] Generated ASS subtitles file`);
