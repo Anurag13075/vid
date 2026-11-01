@@ -3,6 +3,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
 import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
@@ -80,10 +81,28 @@ app.get("/api/health", (_req, res) => {
 
 // In production, serve the built frontend and let the SPA handle routing
 if (IS_PROD) {
-  const distPath = path.join(__dirname, "../dist/public");
+  const candidatePaths = [
+    path.join(__dirname, "../dist"),
+    path.join(__dirname, "../dist/public"),
+    path.join(__dirname, "../dist/client"),
+    path.join(process.cwd(), "dist"),
+    path.join(process.cwd(), "dist/public"),
+  ];
+  const resolveDist = () => {
+    for (const c of candidatePaths) {
+      if (fs.existsSync(path.join(c, "index.html"))) return c;
+    }
+    return path.join(__dirname, "../dist");
+  };
+  const distPath = resolveDist();
   app.use(express.static(distPath));
   app.get("*", (_req, res) => {
-    res.sendFile(path.join(distPath, "index.html"));
+    const activeDist = resolveDist();
+    const indexPath = path.join(activeDist, "index.html");
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+    res.status(404).send("Application frontend build artifact (index.html) not found.");
   });
 }
 

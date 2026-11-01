@@ -7,6 +7,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
 import { jobQueue } from "./pipeline/queue.js";
@@ -76,12 +77,37 @@ app.get("/api/health", (_req, res) => {
 });
 
 // ── Frontend SPA static serving ───────────────────────────────────────────────
-const distPath = path.join(__dirname, "../dist/public");
+const candidatePaths = [
+  path.join(__dirname, "../dist"),
+  path.join(__dirname, "../dist/public"),
+  path.join(__dirname, "../dist/client"),
+  path.join(process.cwd(), "dist"),
+  path.join(process.cwd(), "dist/public"),
+  path.join(process.cwd(), "dist/client"),
+];
+
+function resolveDistPath(): string {
+  for (const candidate of candidatePaths) {
+    if (fs.existsSync(path.join(candidate, "index.html"))) {
+      return candidate;
+    }
+  }
+  return path.join(__dirname, "../dist");
+}
+
+const distPath = resolveDistPath();
+console.log(`[server] Serving static frontend from: ${distPath}`);
+
 app.use(express.static(distPath));
 
 // Fallback for client-side routing
 app.get(/.*/, (req, res) => {
-  res.sendFile(path.join(distPath, "index.html"));
+  const activeDist = resolveDistPath();
+  const indexPath = path.join(activeDist, "index.html");
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  res.status(404).send("Application frontend build artifact (index.html) not found.");
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
