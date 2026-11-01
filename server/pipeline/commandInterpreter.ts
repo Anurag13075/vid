@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { resolveGroqModels } from "./scriptGenerator.js";
 
 // ─── Zod Action Schemas for Video Pipeline Voice Commands ───────────────────
 
@@ -140,32 +141,50 @@ STRICT RULES:
 - If the user asks to play, pause, seek, jump to a scene or timestamp, output navigate (requires_re_render: false).
 `;
 
-  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+  const models = await resolveGroqModels(apiKey);
+  let lastError: Error | null = null;
+  let raw = "{}";
 
-  const response = await fetch(GROQ_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: dictatedCommand },
-      ],
-      temperature: 0.2,
-      max_tokens: 1500,
-    }),
-  });
+  for (const model of models) {
+    try {
+      const response = await fetch(GROQ_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: dictatedCommand },
+          ],
+          temperature: 0.2,
+          max_tokens: 1500,
+        }),
+      });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Groq interpretation error ${response.status}: ${errText}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        if (response.status === 404 || response.status === 400) {
+          lastError = new Error(`Groq interpretation error ${response.status}: ${errText}`);
+          continue;
+        }
+        throw new Error(`Groq interpretation error ${response.status}: ${errText}`);
+      }
+
+      const data = (await response.json()) as any;
+      raw = data.choices?.[0]?.message?.content || "{}";
+      lastError = null;
+      break;
+    } catch (err: any) {
+      lastError = err;
+    }
   }
 
-  const data = (await response.json()) as any;
-  let raw = data.choices?.[0]?.message?.content || "{}";
+  if (lastError && raw === "{}") {
+    throw lastError;
+  }
   raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 
   const parsed = JSON.parse(raw);

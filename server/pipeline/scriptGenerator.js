@@ -1,10 +1,41 @@
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-// Reliable production models on Groq in priority order
-const GROQ_MODELS = [
-    process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile",
-    "llama-3.1-8b-instant",
-];
+let cachedGroqModels = null;
+export async function resolveGroqModels(apiKey) {
+    if (cachedGroqModels && cachedGroqModels.length > 0)
+        return cachedGroqModels;
+    const candidateOrder = [
+        process.env.GROQ_MODEL,
+        "openai/gpt-oss-120b",
+        "qwen/qwen3.8-27b",
+        "openai/gpt-oss-20b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+    ].filter(Boolean);
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch("https://api.groq.com/openai/v1/models", {
+            headers: { Authorization: `Bearer ${apiKey}` },
+            signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (res.ok) {
+            const data = (await res.json());
+            const availableIds = new Set((data.data || []).map((m) => m.id));
+            const verified = candidateOrder.filter((m) => availableIds.has(m));
+            if (verified.length > 0) {
+                cachedGroqModels = verified;
+                console.log(`[groq] Discovered ${verified.length} verified models for API key: ${verified.join(", ")}`);
+                return verified;
+            }
+        }
+    }
+    catch (err) {
+        console.warn(`[groq] Could not query /models endpoint: ${err.message}`);
+    }
+    cachedGroqModels = candidateOrder;
+    return candidateOrder;
+}
 function targetSections(length) {
     switch (length) {
         case "short":
@@ -38,8 +69,9 @@ async function callGroq(messages, maxTokens = 6144) {
     const apiKey = (process.env.GROQ_API_KEY || process.env.GROK_API_KEY || "").trim();
     if (!apiKey)
         throw new Error("GROQ_API_KEY environment variable is not set");
+    const models = await resolveGroqModels(apiKey);
     let lastError = null;
-    for (const model of GROQ_MODELS) {
+    for (const model of models) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 85_000);
         try {
