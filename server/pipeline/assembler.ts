@@ -87,46 +87,15 @@ interface SectionTiming {
   keyPoint: string | null;
 }
 
-// ─── Drawtext Escape & Text Wrapping ─────────────────────────────────────────
-function escapeDrawtext(text: string): string {
-  return text
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/:/g, "\\:")
-    .replace(/%/g, "%%")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/,/g, "\\,")
-    .replace(/;/g, "\\;")
-    .slice(0, 90);
-}
-
-function wrapText(text: string, maxChars: number): string[] {
-  const words = text.trim().split(/\s+/);
-  const lines: string[] = [];
-  let current = "";
-  for (const word of words) {
-    if (!current) {
-      current = word;
-      continue;
-    }
-    if ((current + " " + word).length <= maxChars) {
-      current += " " + word;
-    } else {
-      lines.push(current);
-      current = word;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
 // ─── ASS SubStation Alpha Helpers ───────────────────────────────────────────
 function assTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const cs = Math.round((seconds % 1) * 100);
+  const totalCs = Math.max(0, Math.floor(seconds * 100));
+  const cs = totalCs % 100;
+  const totalSec = Math.floor(totalCs / 100);
+  const s = totalSec % 60;
+  const totalMin = Math.floor(totalSec / 60);
+  const m = totalMin % 60;
+  const h = Math.floor(totalMin / 60);
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
@@ -148,9 +117,17 @@ function escapeAss(text: string): string {
     .trim();
 }
 
+function escapeFilterPath(filePath: string): string {
+  return filePath
+    .replace(/\\/g, "/")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "'\\''");
+}
+
 // ─── Native 1080p Ken Burns Motion Filter ────────────────────────────────────
 function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
-  const totalFrames = Math.max(Math.ceil(durationSec * FPS), 1);
+  const totalFrames = Math.max(Math.ceil(durationSec * FPS), 2);
+  const denom = totalFrames - 1;
   const w = OUTPUT_WIDTH;
   const h = OUTPUT_HEIGHT;
   const SCALE = 1.12;
@@ -158,25 +135,27 @@ function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
   const sh = Math.round(h * SCALE);
   const dx = sw - w;
   const dy = sh - h;
-  const prog = `min(n,${totalFrames - 1})/${totalFrames - 1}`;
+  const prog = `(min(n,${denom})/${denom})`;
+
+  const baseScale = `scale=${sw}:${sh}:force_original_aspect_ratio=increase,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:color=black`;
 
   switch (motion) {
     case "zoom-in": {
       const cW = `${sw}-${dx}*${prog}`, cH = `${sh}-${dy}*${prog}`;
-      return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop='${cW}':'${cH}':'(${sw}-(${cW}))/2':'(${sh}-(${cH}))/2',scale=${w}:${h}`;
+      return `${baseScale},crop='${cW}':'${cH}':'(${sw}-(${cW}))/2':'(${sh}-(${cH}))/2',scale=${w}:${h}`;
     }
     case "zoom-out": {
       const cW = `${w}+${dx}*${prog}`, cH = `${h}+${dy}*${prog}`;
-      return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop='${cW}':'${cH}':'(${sw}-(${cW}))/2':'(${sh}-(${cH}))/2',scale=${w}:${h}`;
+      return `${baseScale},crop='${cW}':'${cH}':'(${sw}-(${cW}))/2':'(${sh}-(${cH}))/2',scale=${w}:${h}`;
     }
     case "pan-right":
-      return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:'${dx}*${prog}':${Math.floor(dy / 2)}`;
+      return `${baseScale},crop=${w}:${h}:'${dx}*${prog}':${Math.floor(dy / 2)}`;
     case "pan-left":
-      return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:'${dx}*(1-${prog})':${Math.floor(dy / 2)}`;
+      return `${baseScale},crop=${w}:${h}:'${dx}*(1-${prog})':${Math.floor(dy / 2)}`;
     case "pan-up":
-      return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*${prog}'`;
+      return `${baseScale},crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*${prog}'`;
     case "pan-down":
-      return `scale=${sw}:${sh}:force_original_aspect_ratio=increase,crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*(1-${prog})'`;
+      return `${baseScale},crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*(1-${prog})'`;
   }
 }
 
@@ -200,9 +179,11 @@ async function renderCut(
 
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)},${gradeFilter}${transitionFilter},format=yuv420p`;
 
-  // Always pass -stream_loop -1 so that clips shorter than durationSec never terminate early
+  const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
+  const loopArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
+
   await ffmpeg([
-    "-stream_loop", "-1",
+    ...loopArgs,
     "-i", clipPath,
     "-vf", fullFilter,
     "-t", durationSec.toFixed(3),
@@ -255,98 +236,6 @@ function sliceCuts(audioDuration: number): number[] {
     remaining -= CUT_TARGET_SEC;
   }
   return cuts;
-}
-
-// ─── Build Drawtext & Drawbox Overlay Filters ────────────────────────────────
-function buildDrawtextFilters(
-  videoTitle: string,
-  sectionTimings: SectionTiming[],
-  accentHex: string,
-  font: string
-): string[] {
-  const filters: string[] = [];
-  const ff = font ? `fontfile='${font}':` : "";
-  const accentRGB = `0x${accentHex.replace("#", "")}`;
-
-  // Title Card Overlay at start
-  if (videoTitle.trim()) {
-    const titleLine = escapeDrawtext(wrapText(videoTitle, 38)[0] ?? videoTitle.slice(0, 60));
-    const alpha = `if(lt(t\\,0.5)\\,t/0.5\\,if(gt(t\\,3.0)\\,(3.5-t)/0.5\\,1))`;
-    filters.push(
-      `drawtext=${ff}text='${titleLine}':fontsize=60:fontcolor=white@1.0:` +
-      `x=(w-tw)/2:y=h/2-th-24:` +
-      `box=1:boxcolor=0x000000BB:boxborderw=30:` +
-      `borderw=2:bordercolor=black@0.9:` +
-      `alpha='${alpha}':enable='between(t\\,0\\,3.5)'`
-    );
-    filters.push(
-      `drawbox=x=(iw-600)/2:y=ih/2+4:w=600:h=4:color=${accentRGB}:t=fill:` +
-      `enable='between(t\\,0.4\\,3.5)'`
-    );
-  }
-
-  // Stat / Key Fact Callout Cards
-  for (const t of sectionTimings) {
-    if (t.sectionType !== "stat" || !t.keyPoint) continue;
-    const dur = t.endSec - t.startSec;
-    if (dur < 1.0) continue;
-
-    const showStart = t.startSec + 0.5;
-    const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.3);
-    if (showEnd <= showStart) continue;
-
-    const lines = wrapText(t.keyPoint, 34).slice(0, 2);
-    const alpha = `if(lt(t\\,${(showStart + 0.3).toFixed(2)})\\,(t-${showStart.toFixed(2)})/0.3\\,if(gt(t\\,${(showEnd - 0.3).toFixed(2)})\\,(${showEnd.toFixed(2)}-t)/0.3\\,1))`;
-
-    const boxH = lines.length * 72 + 44;
-    const boxW = 900;
-    const boxX = (OUTPUT_WIDTH - boxW) / 2;
-    const boxY = (OUTPUT_HEIGHT - boxH) / 2 - 30;
-    filters.push(
-      `drawbox=x=${boxX.toFixed(0)}:y=${boxY.toFixed(0)}:w=${boxW}:h=${boxH}:color=0x000000CC:t=fill:` +
-      `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
-    );
-    filters.push(
-      `drawbox=x=${boxX.toFixed(0)}:y=${boxY.toFixed(0)}:w=${boxW}:h=5:color=${accentRGB}:t=fill:` +
-      `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
-    );
-
-    lines.forEach((line, li) => {
-      const esc = escapeDrawtext(line);
-      const yPos = (OUTPUT_HEIGHT / 2 - lines.length * 36 + li * 72 - 18).toFixed(0);
-      filters.push(
-        `drawtext=${ff}text='${esc}':fontsize=54:fontcolor=white@1.0:` +
-        `x=(w-tw)/2:y=${yPos}:` +
-        `borderw=3:bordercolor=black@0.9:` +
-        `alpha='${alpha}':enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
-      );
-    });
-  }
-
-  // Section Chapter Markers (Intro / Outro)
-  for (const t of sectionTimings) {
-    if (t.sectionType !== "intro" && t.sectionType !== "outro") continue;
-    const isIntro = t.sectionType === "intro";
-    const showStart = isIntro ? Math.max(t.startSec, 4.0) : t.startSec + 0.3;
-    const showEnd = Math.min(showStart + 3.5, t.endSec - 0.3);
-    if (showEnd <= showStart) continue;
-
-    const label = escapeDrawtext(isIntro ? "Introduction" : "Conclusion");
-    const alpha = `if(lt(t\\,${(showStart + 0.4).toFixed(2)})\\,(t-${showStart.toFixed(2)})/0.4\\,if(gt(t\\,${(showEnd - 0.4).toFixed(2)})\\,(${showEnd.toFixed(2)}-t)/0.4\\,1))`;
-
-    filters.push(
-      `drawbox=x=72:y=${OUTPUT_HEIGHT - 138}:w=240:h=44:color=${accentRGB}CC:t=fill:` +
-      `enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
-    );
-    filters.push(
-      `drawtext=${ff}text='${label}':fontsize=24:fontcolor=white@1.0:` +
-      `x=90:y=${OUTPUT_HEIGHT - 128}:` +
-      `borderw=1:bordercolor=black@0.6:` +
-      `alpha='${alpha}':enable='between(t\\,${showStart.toFixed(2)}\\,${showEnd.toFixed(2)})'`
-    );
-  }
-
-  return filters;
 }
 
 // ─── ASS Subtitles & Karaoke Generator ───────────────────────────────────────
@@ -411,6 +300,7 @@ async function generateAssKaraoke(
     if (duration <= 0) continue;
 
     const words = section.narration.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) continue;
     const charCounts = words.map((w) => Math.max(w.length, 1));
     const totalChars = charCounts.reduce((a, b) => a + b, 0);
     const wordDurs = charCounts.map((c) => (c / totalChars) * duration);
@@ -483,15 +373,29 @@ async function joinAllCuts(
 
   console.log(`[assembler] joining ${clipPaths.length} cuts into single stream`);
 
-  await ffmpeg([
-    "-f", "concat",
-    "-safe", "0",
-    "-i", listPath,
-    "-c", "copy",
-    "-fflags", "+genpts",
-    "-avoid_negative_ts", "make_zero",
-    "-y", outputPath,
-  ], options);
+  try {
+    await ffmpeg([
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listPath,
+      "-c", "copy",
+      "-fflags", "+genpts",
+      "-avoid_negative_ts", "make_zero",
+      "-y", outputPath,
+    ], options);
+  } catch (err: any) {
+    if (options?.signal?.aborted) throw err;
+    console.warn(`[assembler] Fast concat failed (${err.message}). Retrying with re-encode concat fallback...`);
+    await ffmpeg([
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listPath,
+      "-c:v", "libx264", "-crf", String(CRF), "-preset", "ultrafast",
+      "-pix_fmt", "yuv420p",
+      "-r", String(FPS),
+      "-an", "-y", outputPath,
+    ], options);
+  }
 
   await fs.unlink(listPath).catch(() => {});
 }
@@ -509,18 +413,34 @@ async function mergeAudio(
       "-t", "5",
       "-c:a", "aac",
       "-b:a", "192k",
+      "-ar", "44100",
       "-y", outputPath,
     ], options);
     return;
   }
   if (audioPaths.length === 1) {
-    await fs.copyFile(audioPaths[0], outputPath);
+    await ffmpeg([
+      "-i", audioPaths[0],
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-ar", "44100",
+      "-ac", "2",
+      "-y", outputPath,
+    ], options);
     return;
   }
 
   const inputs: string[] = [];
-  audioPaths.forEach((p) => inputs.push("-i", p));
-  const fc = audioPaths.map((_, i) => `[${i}:a]`).join("") + `concat=n=${audioPaths.length}:v=0:a=1[a]`;
+  const formatFilters: string[] = [];
+  const concatInputs: string[] = [];
+
+  for (let i = 0; i < audioPaths.length; i++) {
+    inputs.push("-i", audioPaths[i]);
+    formatFilters.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a${i}]`);
+    concatInputs.push(`[a${i}]`);
+  }
+
+  const fc = `${formatFilters.join(";")};${concatInputs.join("")}concat=n=${audioPaths.length}:v=0:a=1[a]`;
 
   await ffmpeg([
     ...inputs,
@@ -533,83 +453,108 @@ async function mergeAudio(
   ], options);
 }
 
-// ─── Final Production Mix (Drawtext + Drawbox + ASS Subtitles) ───────────────
+// ─── Final Production Mix (Resilient 3-Tier Mixing Engine) ───────────────────
 async function finalProductionMix(
   videoPath: string,
   voiceoverPath: string,
   bgmPath: string | null,
   assPath: string | null,
   outputPath: string,
-  videoTitle: string,
-  sectionTimings: SectionTiming[],
-  accentHex: string,
+  videoTitle?: string,
+  sectionTimings?: SectionTiming[],
+  accentHex?: string,
   options?: { videoId?: string; signal?: AbortSignal }
 ): Promise<void> {
-  const caps = getFFmpegCapabilities();
-  const font = await resolveFont();
+  const hasBgm = bgmPath && (await fs.stat(bgmPath).catch(() => null))?.size;
+  const hasAss = assPath && (await fs.stat(assPath).catch(() => null))?.size;
 
   const vfFilters: string[] = [];
-
-  // Primary: Apply ASS subtitle & graphics stream (TitleCard, TitleBadge, StatCard, ChapterTag, Karaoke)
-  // libass is compiled in all static and dynamic builds (--enable-libass), completely avoiding drawtext filtergraph crashes
-  if (assPath) {
-    try {
-      if (fs.existsSync(assPath)) {
-        const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-        vfFilters.push(`ass='${escaped}'`);
-        console.log("[assembler] Applied broadcast ASS subtitles & overlays stream");
-      }
-    } catch {}
-  } else if (caps.hasDrawtext && caps.hasDrawbox) {
-    // Secondary fallback only if ASS is not available
-    console.log("[assembler] Applying drawtext and drawbox overlays (ASS unavailable)");
-    const drawtextFilters = buildDrawtextFilters(videoTitle, sectionTimings, accentHex, font);
-    if (drawtextFilters.length > 0) {
-      vfFilters.push(...drawtextFilters);
-    }
+  if (hasAss && assPath) {
+    vfFilters.push(`ass='${escapeFilterPath(assPath)}'`);
+    console.log("[assembler] Applied broadcast ASS subtitles & overlays stream");
   }
-
   vfFilters.push("format=yuv420p");
   const videoFilterStr = vfFilters.join(",");
 
-  const hasBgm = bgmPath && (await fs.stat(bgmPath).catch(() => null))?.size;
+  // ── Tier 1: Full broadcast mix (ASS subtitles + BGM dynamic ducking + loudnorm) ──
+  try {
+    if (hasBgm && bgmPath) {
+      const voDur = await getExactDuration(voiceoverPath);
+      const fadeOutStart = Math.max(voDur - 2.5, 0);
 
-  console.log(`[assembler] Final render pass: drawtext=${caps.hasDrawtext}, ass=${caps.hasAss}, BGM=${!!hasBgm}`);
-
-  if (hasBgm) {
-    const voDur = await getExactDuration(voiceoverPath);
-    const fadeOutStart = Math.max(voDur - 2.5, 0);
-
-    await ffmpeg([
-      "-i", videoPath,
-      "-i", voiceoverPath,
-      "-stream_loop", "-1", "-i", bgmPath,
-      "-filter_complex", [
-        `[2:a]volume=0.10,afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
-        `[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
-      ].join(";"),
-      "-map", "0:v", "-map", "[audio]",
-      "-vf", videoFilterStr,
-      "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
-      "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-      "-movflags", "+faststart",
-      "-y", outputPath,
-    ], options);
-  } else {
-    await ffmpeg([
-      "-i", videoPath,
-      "-i", voiceoverPath,
-      "-filter_complex", `[1:a]loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
-      "-map", "0:v", "-map", "[audio]",
-      "-vf", videoFilterStr,
-      "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
-      "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-      "-movflags", "+faststart",
-      "-y", outputPath,
-    ], options);
+      await ffmpeg([
+        "-i", videoPath,
+        "-i", voiceoverPath,
+        "-stream_loop", "-1", "-i", bgmPath,
+        "-filter_complex", [
+          `[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.10,afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
+          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo[vo]`,
+          `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
+        ].join(";"),
+        "-map", "0:v", "-map", "[audio]",
+        "-vf", videoFilterStr,
+        "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-movflags", "+faststart",
+        "-y", outputPath,
+      ], options);
+    } else {
+      await ffmpeg([
+        "-i", videoPath,
+        "-i", voiceoverPath,
+        "-filter_complex", `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
+        "-map", "0:v", "-map", "[audio]",
+        "-vf", videoFilterStr,
+        "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-movflags", "+faststart",
+        "-y", outputPath,
+      ], options);
+    }
+    console.log("[assembler] Tier 1 production mix successful");
+    return;
+  } catch (err: any) {
+    if (options?.signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
+      throw err;
+    }
+    console.warn(`[assembler] Tier 1 mix failed (${err.message}). Retrying Tier 2 (safe mix)...`);
   }
+
+  // ── Tier 2: Safe mix with ASS subtitles + clean voiceover (no complex audio filters) ──
+  try {
+    await ffmpeg([
+      "-i", videoPath,
+      "-i", voiceoverPath,
+      "-map", "0:v", "-map", "1:a",
+      "-vf", videoFilterStr,
+      "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+      "-movflags", "+faststart",
+      "-y", outputPath,
+    ], options);
+    console.log("[assembler] Tier 2 safe mix successful");
+    return;
+  } catch (err: any) {
+    if (options?.signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
+      throw err;
+    }
+    console.warn(`[assembler] Tier 2 mix failed (${err.message}). Retrying Tier 3 (direct stream mux)...`);
+  }
+
+  // ── Tier 3: Direct stream mux (zero video re-encoding, guaranteed to succeed) ──
+  await ffmpeg([
+    "-i", videoPath,
+    "-i", voiceoverPath,
+    "-map", "0:v", "-map", "1:a",
+    "-c:v", "copy",
+    "-c:a", "aac", "-b:a", "192k",
+    "-movflags", "+faststart",
+    "-y", outputPath,
+  ], options);
+  console.log("[assembler] Tier 3 direct mux completed successfully");
 }
 
 // ─── Thumbnail Extraction ────────────────────────────────────────────────────
@@ -618,8 +563,10 @@ async function extractThumbnail(
   thumbPath: string,
   options?: { videoId?: string; signal?: AbortSignal }
 ): Promise<void> {
+  const dur = await getExactDuration(videoPath);
+  const seekSec = Math.min(3.0, Math.max(dur / 2, 0.5));
   await ffmpeg([
-    "-ss", "3.5",
+    "-ss", seekSec.toFixed(2),
     "-i", videoPath,
     "-vframes", "1",
     "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
@@ -872,7 +819,22 @@ export async function assemble(
   if (signal?.aborted) throw new Error("Assembly cancelled by user");
   await onProgress(6, total, RENDER_STEPS[6].label);
   const thumbPath = path.join(outputDir, "thumb.jpg");
-  await extractThumbnail(finalMp4, thumbPath, opts);
+  try {
+    await extractThumbnail(finalMp4, thumbPath, opts);
+  } catch (err: any) {
+    if (signal?.aborted) throw err;
+    console.warn(`[assembler] Primary thumbnail seek failed (${err.message}). Attempting fallback frame 0 extraction...`);
+    try {
+      await ffmpeg([
+        "-i", finalMp4,
+        "-vframes", "1",
+        "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
+        "-y", thumbPath,
+      ], opts);
+    } catch (fallbackErr: any) {
+      console.warn(`[assembler] Fallback thumbnail extraction failed (${fallbackErr.message}). Continuing with video.`);
+    }
+  }
 
   // Rolling cleanup: remove cut files and intermediate timeline
   for (const cut of renderedCuts) {
