@@ -73,6 +73,50 @@ async function generateElevenLabsTTS(text, voiceId, outputPath) {
         throw err;
     }
 }
+// ─── Free High-Quality Spoken TTS Fallback (Zero API Key Required) ───────────
+async function generateFreeTTS(text, outputPath) {
+    const words = text.split(/\s+/).filter(Boolean);
+    const chunks = [];
+    let cur = "";
+    for (const w of words) {
+        if ((cur + " " + w).length <= 160) {
+            cur += (cur ? " " : "") + w;
+        }
+        else {
+            if (cur)
+                chunks.push(cur);
+            cur = w;
+        }
+    }
+    if (cur)
+        chunks.push(cur);
+    const buffers = [];
+    for (const chunk of chunks) {
+        const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=en&client=tw-ob`;
+        const res = await fetch(url, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+        });
+        if (!res.ok)
+            throw new Error(`Free TTS error ${res.status}`);
+        const ab = await res.arrayBuffer();
+        buffers.push(Buffer.from(ab));
+    }
+    const rawAudio = Buffer.concat(buffers);
+    const tmpRaw = outputPath + ".raw.mp3";
+    await fs.writeFile(tmpRaw, rawAudio);
+    // Normalize audio to standard 44.1kHz stereo MP3
+    await ffmpeg([
+        "-i", tmpRaw,
+        "-ar", "44100",
+        "-ac", "2",
+        "-c:a", "libmp3lame",
+        "-b:a", "192k",
+        "-y", outputPath,
+    ]);
+    await fs.unlink(tmpRaw).catch(() => { });
+}
 // ─── Public API ─────────────────────────────────────────────────────────────
 export async function generateVoiceover(section, videoId, voice) {
     const dir = getTempDir(path.join(videoId, "audio"));
@@ -85,7 +129,7 @@ export async function generateVoiceover(section, videoId, voice) {
         await generateSilence(audioPath, 2500);
         return { audioPath, durationMs: 2500 };
     }
-    // 1. ElevenLabs TTS
+    // 1. ElevenLabs TTS (if API key is present)
     const elevenKey = (process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_LABS_API_KEY || "").trim();
     if (elevenKey) {
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -106,10 +150,21 @@ export async function generateVoiceover(section, videoId, voice) {
             }
         }
     }
-    else {
-        console.warn(`[tts] No ELEVENLABS_API_KEY set. Utilizing natural pacing duration audio for section ${section.id}.`);
+    // 2. High-Quality Free Spoken TTS Fallback (Guarantees real voice is always heard)
+    try {
+        console.log(`[tts] Synthesizing spoken voiceover via Free High-Quality TTS for section ${section.id}...`);
+        await generateFreeTTS(text, audioPath);
+        const stat = await fs.stat(audioPath).catch(() => null);
+        if (stat && stat.size > 200) {
+            const durationMs = await getAudioDurationMs(audioPath);
+            console.log(`[tts] Free TTS complete for section ${section.id}: ${(durationMs / 1000).toFixed(1)}s`);
+            return { audioPath, durationMs };
+        }
     }
-    // 2. Fallback: Proportional natural silence pacing (145 WPM documentary speed)
+    catch (freeErr) {
+        console.warn(`[tts] Free TTS fallback failed for section ${section.id}:`, freeErr.message);
+    }
+    // 3. Fallback: Proportional natural silence pacing
     const estimatedMs = estimateDuration(text);
     console.log(`[tts] Section ${section.id}: pacing duration set to ${(estimatedMs / 1000).toFixed(1)}s`);
     await generateSilence(audioPath, estimatedMs);

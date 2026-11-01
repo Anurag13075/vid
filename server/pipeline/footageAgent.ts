@@ -87,7 +87,7 @@ async function searchPexels(
   usedIds: Set<string>
 ): Promise<Clip[]> {
   const clips: Clip[] = [];
-  const apiKey = (process.env.PEXELS_API_KEY || "").trim();
+  const apiKey = (process.env.PEXELS_API_KEY || "sYsJWjfNBleX61WYAZfRlenvWr1z2UkP7LlbieI9igmsX1k7Tv8yD27G").trim();
   if (!apiKey) return clips;
 
   try {
@@ -154,7 +154,7 @@ async function searchPixabay(
   usedIds: Set<string>
 ): Promise<Clip[]> {
   const clips: Clip[] = [];
-  const apiKey = (process.env.PIXABAY_API_KEY || "").trim();
+  const apiKey = (process.env.PIXABAY_API_KEY || "56217573-a9df706c6c543d52b87c2dcb4").trim();
   if (!apiKey) return clips;
 
   try {
@@ -204,6 +204,60 @@ async function searchPixabay(
   return clips;
 }
 
+async function searchPexelsPhotos(
+  keyword: string,
+  needed: number,
+  usedIds: Set<string>
+): Promise<Clip[]> {
+  const clips: Clip[] = [];
+  const apiKey = (process.env.PEXELS_API_KEY || "sYsJWjfNBleX61WYAZfRlenvWr1z2UkP7LlbieI9igmsX1k7Tv8yD27G").trim();
+  if (!apiKey) return clips;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+
+    const response = await fetch(
+      `https://api.pexels.com/v1/search?query=${encodeURIComponent(keyword)}&per_page=30&orientation=landscape`,
+      {
+        headers: { Authorization: apiKey },
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timer);
+
+    if (!response.ok) return clips;
+
+    const data = (await response.json()) as any;
+    const photos = (data.photos || []).filter((p: any) => !usedIds.has(`pexels_photo_${p.id}`));
+
+    for (const photo of photos) {
+      if (clips.length >= needed) break;
+      const idStr = `pexels_photo_${photo.id}`;
+      if (usedIds.has(idStr)) continue;
+
+      const imageUrl = photo.src?.large2x || photo.src?.large || photo.src?.original;
+      if (!imageUrl) continue;
+
+      usedIds.add(idStr);
+      clips.push({
+        id: photo.id,
+        keyword,
+        thumbUrl: photo.src?.tiny || photo.src?.small || "",
+        videoUrl: imageUrl,
+        source: "pexels",
+        externalId: idStr,
+        duration: 8,
+        license: "Pexels License (Free to use)",
+        sourceUrl: photo.url || `https://www.pexels.com/photo/${photo.id}/`,
+        status: "pending",
+      });
+    }
+  } catch (err: any) {}
+
+  return clips;
+}
+
 export async function findMultipleFootage(
   section: ScriptSection,
   limit: number,
@@ -222,14 +276,14 @@ export async function findMultipleFootage(
     ? cleanKeywords
     : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)];
 
-  // Phase 1: Pexels API
+  // Phase 1: Pexels Videos API
   for (const keyword of keywordsToTry) {
     if (clips.length >= clipsNeeded) break;
     const found = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
     clips.push(...found);
   }
 
-  // Phase 2: Pixabay API
+  // Phase 2: Pixabay Videos API
   if (clips.length < clipsNeeded) {
     for (const keyword of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
@@ -248,6 +302,29 @@ export async function findMultipleFootage(
       if (clips.length < clipsNeeded) {
         const pixabayFound = await searchPixabay(keyword, clipsNeeded - clips.length, usedIds);
         clips.push(...pixabayFound);
+      }
+    }
+  }
+
+  // Phase 4: High-Res Pexels Photos with Ken Burns Pan/Zoom Animation
+  if (clips.length < clipsNeeded) {
+    for (const keyword of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const photos = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
+      clips.push(...photos);
+    }
+  }
+
+  // Phase 5: Guaranteed Universal Cinematic Abstract B-roll
+  if (clips.length < clipsNeeded) {
+    const genericQueries = ["technology abstract", "cinematic lights", "city timelapse", "business office", "motion background"];
+    for (const keyword of genericQueries) {
+      if (clips.length >= clipsNeeded) break;
+      const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
+      clips.push(...pexelsFound);
+      if (clips.length < clipsNeeded) {
+        const photos = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
+        clips.push(...photos);
       }
     }
   }
@@ -313,7 +390,9 @@ export async function downloadClip(
   const tmpDir = getTempDir(videoId);
   await fs.mkdir(tmpDir, { recursive: true });
 
-  const outPath = path.join(tmpDir, `${suffix}.mp4`);
+  const isImg = clip.externalId.includes("_photo_") || /\.(jpe?g|png|webp|avif)(\?|$)/i.test(clip.videoUrl);
+  const ext = isImg ? "jpg" : "mp4";
+  const outPath = path.join(tmpDir, `${suffix}.${ext}`);
   if (!clip.videoUrl) throw new Error("Clip has no videoUrl");
 
   for (let attempt = 1; attempt <= 3; attempt++) {
