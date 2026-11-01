@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Logo } from "@/components/Logo";
 import { PipelineStepper } from "@/components/PipelineStepper";
 import { ClipGrid } from "@/components/ClipGrid";
@@ -7,7 +7,8 @@ import { Waveform } from "@/components/Waveform";
 import { RenderProgress } from "@/components/RenderProgress";
 import { Timeline } from "@/components/Timeline";
 import { useJob } from "@/lib/usePipeline";
-import { Loader2, RotateCcw, FileText, Film } from "lucide-react";
+import { cancelJob } from "@/lib/pipeline";
+import { Loader2, RotateCcw, FileText, Film, XCircle, StopCircle, ArrowLeft } from "lucide-react";
 import type { Script, Clip } from "@/lib/pipeline";
 
 export const Route = createFileRoute("/generate/$jobId")({
@@ -19,6 +20,7 @@ function GeneratePage() {
   const { jobId } = Route.useParams();
   const navigate = useNavigate();
   const job = useJob(jobId);
+  const [isCancelling, setIsCancelling] = useState(false);
 
   useEffect(() => {
     if (job?.stage === "done") {
@@ -26,6 +28,21 @@ function GeneratePage() {
       return () => clearTimeout(t);
     }
   }, [job?.stage, jobId, navigate]);
+
+  const handleCancel = async () => {
+    if (isCancelling) return;
+    const ok = window.confirm(
+      "Are you sure you want to stop this video generation? This will immediately terminate background FFmpeg encoding and free up the pipeline so you can start a fresh video."
+    );
+    if (!ok) return;
+
+    setIsCancelling(true);
+    try {
+      await cancelJob(jobId);
+    } finally {
+      navigate({ to: "/create" });
+    }
+  };
 
   if (!job) {
     return (
@@ -42,12 +59,13 @@ function GeneratePage() {
             </div>
             <h2 className="text-[28px] font-bold text-white mb-3">You're in queue</h2>
             <p className="text-[14px] text-[var(--text-secondary)] leading-relaxed mb-4">
-              Your video is being processed. You can close this page and return later to check the progress.
+              Your video is being processed. You can stop this video at any time and start fresh.
             </p>
-            <p className="text-[12px] text-[var(--text-muted)]">
-              Processing time may vary based on current demand
+            <p className="text-[12px] text-[var(--text-muted)] mb-6">
+              Processing time may vary based on topic depth
             </p>
-            <div className="mt-6 flex items-center justify-center gap-1.5">
+
+            <div className="flex items-center justify-center gap-1.5 mb-8">
               {[0, 1, 2].map((i) => (
                 <div
                   key={i}
@@ -56,6 +74,15 @@ function GeneratePage() {
                 />
               ))}
             </div>
+
+            <button
+              onClick={handleCancel}
+              disabled={isCancelling}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-white/10 hover:border-red-500/50 bg-white/5 hover:bg-red-500/10 text-white/80 hover:text-red-300 transition-all text-[13px] font-medium"
+            >
+              {isCancelling ? <Loader2 className="h-4 w-4 animate-spin text-red-400" /> : <XCircle className="h-4 w-4 text-red-400" />}
+              Cancel & Start Over
+            </button>
           </div>
         </div>
       </div>
@@ -63,18 +90,33 @@ function GeneratePage() {
   }
 
   if (job.stage === "error") {
+    const isCancelled = job.message?.toLowerCase().includes("cancelled");
     return (
       <div className="dark-app min-h-screen flex items-center justify-center">
         <div className="text-center max-w-md px-5">
-          <div className="text-[12px] text-[var(--accent)] mb-2">Pipeline Error</div>
-          <h1 className="text-h1 text-white mb-3">Video generation failed</h1>
-          <p className="text-[14px] text-[var(--text-secondary)] mb-6">{job.message}</p>
-          <Link
-            to="/"
-            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] transition-colors font-medium text-white"
-          >
-            <RotateCcw className="h-4 w-4" /> Try again
-          </Link>
+          <div className="text-[12px] text-[var(--accent)] mb-2">
+            {isCancelled ? "Generation Stopped" : "Pipeline Error"}
+          </div>
+          <h1 className="text-h1 text-white mb-3">
+            {isCancelled ? "Video generation cancelled" : "Video generation failed"}
+          </h1>
+          <p className="text-[14px] text-[var(--text-secondary)] mb-6">
+            {job.message || "The generation was stopped."}
+          </p>
+          <div className="flex items-center justify-center gap-3">
+            <Link
+              to="/create"
+              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] transition-colors font-medium text-white shadow-sm"
+            >
+              <RotateCcw className="h-4 w-4" /> Start fresh video
+            </Link>
+            <Link
+              to="/"
+              className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-[var(--border)] hover:bg-white/5 text-[var(--text-secondary)] hover:text-white transition-colors text-[13px] font-medium"
+            >
+              <ArrowLeft className="h-4 w-4" /> Home
+            </Link>
+          </div>
         </div>
       </div>
     );
@@ -94,6 +136,14 @@ function GeneratePage() {
           <div className="flex items-center gap-3">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
             <span className="text-[12px] text-[var(--text-secondary)]">In queue</span>
+            <button
+              onClick={handleCancel}
+              disabled={isCancelling}
+              className="ml-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-[11px] font-medium transition-colors"
+            >
+              {isCancelling ? <Loader2 className="h-3 w-3 animate-spin" /> : <StopCircle className="h-3 w-3 text-red-400" />}
+              Cancel
+            </button>
           </div>
         </header>
         <div className="flex-1 flex items-center justify-center">
@@ -107,13 +157,13 @@ function GeneratePage() {
             </div>
             <h2 className="text-[28px] font-bold text-white mb-3">You're in queue</h2>
             <p className="text-[14px] text-[var(--text-secondary)] leading-relaxed mb-4">
-              Your video is being processed. You can close this page and return later to check the progress.
+              Your video is being researched and processed.
             </p>
             <p className="text-[12px] text-[var(--text-muted)] mb-2">{job.message}</p>
-            <p className="text-[12px] text-[var(--text-muted)]">
+            <p className="text-[12px] text-[var(--text-muted)] mb-6">
               Processing time may vary based on current demand
             </p>
-            <div className="mt-6 flex items-center justify-center gap-1.5">
+            <div className="mt-2 mb-8 flex items-center justify-center gap-1.5">
               {[0, 1, 2].map((i) => (
                 <div
                   key={i}
@@ -122,6 +172,15 @@ function GeneratePage() {
                 />
               ))}
             </div>
+
+            <button
+              onClick={handleCancel}
+              disabled={isCancelling}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-white/10 hover:border-red-500/50 bg-white/5 hover:bg-red-500/10 text-white/80 hover:text-red-300 transition-all text-[13px] font-medium"
+            >
+              {isCancelling ? <Loader2 className="h-4 w-4 animate-spin text-red-400" /> : <XCircle className="h-4 w-4 text-red-400" />}
+              Cancel Generation
+            </button>
           </div>
         </div>
       </div>
@@ -136,7 +195,7 @@ function GeneratePage() {
           <div className="h-5 w-px bg-[var(--border)]" />
           <div className="text-[13px] text-[var(--text-secondary)] truncate max-w-[420px]">
             <span className="text-[var(--text-muted)]">Topic:</span>{" "}
-            <span className="text-white">{job.topic}</span>
+            <span className="text-white">{job.topic || job.title}</span>
           </div>
         </div>
         <div className="flex items-center gap-4 text-[12px] text-[var(--text-secondary)]">
@@ -150,6 +209,22 @@ function GeneratePage() {
             <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)] animate-pulse" />
             {job.stage === "done" ? "Complete" : "Live render"}
           </span>
+
+          {job.stage !== "done" && (
+            <button
+              onClick={handleCancel}
+              disabled={isCancelling}
+              title="Stop background FFmpeg encoding and cancel generation"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-300 hover:text-red-200 transition-all text-[12px] font-medium"
+            >
+              {isCancelling ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-red-400" />
+              ) : (
+                <StopCircle className="h-3.5 w-3.5 text-red-400" />
+              )}
+              Stop Generation
+            </button>
+          )}
         </div>
       </header>
 
@@ -258,11 +333,11 @@ function StageView({ jobId }: { jobId: string }) {
     return (
       <div className="max-w-4xl">
         <Header
-          eyebrow="Claude AI Writer"
+          eyebrow="AI Research & Writer"
           title={job.script?.title || "Generating script..."}
           subtitle={
             job.script
-              ? `${job.script.sections.length} sections drafted · mood: ${job.script.mood || "neutral"}`
+              ? `${job.script.sections.length} scenes drafted · mood: ${job.script.mood || "documentary"}`
               : job.message
           }
         />
@@ -272,10 +347,10 @@ function StageView({ jobId }: { jobId: string }) {
           <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-8 font-mono text-[14px] text-[var(--text-secondary)]">
             <TypingLines
               lines={[
-                "→ crafting documentary narrative with Claude AI...",
-                "→ structuring 3-act story arc...",
-                "→ writing rich narration sections...",
-                "→ selecting visual keywords per line...",
+                "→ researching topic facts and archives...",
+                "→ structuring retention-friendly narrative arc...",
+                "→ writing spoken narration sections...",
+                "→ selecting matched visual keywords per scene...",
               ]}
             />
           </div>
@@ -285,7 +360,7 @@ function StageView({ jobId }: { jobId: string }) {
   }
 
   if (job.stage === "voiceover") {
-    const match = job.message.match(/(\d+)\/(\d+)/);
+    const match = job.message?.match(/(\d+)\/(\d+)/);
     const currentIdx = match ? parseInt(match[1]) - 1 : 0;
     const currentSection = job.script?.sections[currentIdx];
     const total = match ? parseInt(match[2]) : (job.script?.sections.length ?? 0);
@@ -293,9 +368,9 @@ function StageView({ jobId }: { jobId: string }) {
     return (
       <div className="max-w-2xl space-y-5">
         <Header
-          eyebrow="MiniMax TTS Voice Over"
-          title={`${job.voice} · MiniMax Neural TTS`}
-          subtitle={`Section ${(currentIdx + 1)} of ${total}`}
+          eyebrow="Documentary Voiceover"
+          title={`${job.voice} · High-Fidelity Voice Narration`}
+          subtitle={`Scene ${(currentIdx + 1)} of ${total}`}
         />
         {currentSection && (
           <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
@@ -316,8 +391,8 @@ function StageView({ jobId }: { jobId: string }) {
           <Waveform />
           <div className="mt-4 flex items-center justify-between text-[12px] text-[var(--text-secondary)] font-mono">
             <span>{job.progress}%</span>
-            <span>MiniMax Speech-02-HD</span>
-            <span>MP3 · 32kHz</span>
+            <span>Documentary Pacing (145 WPM)</span>
+            <span>44.1kHz Stereo</span>
           </div>
         </div>
       </div>
@@ -330,7 +405,7 @@ function StageView({ jobId }: { jobId: string }) {
       <div className="max-w-5xl">
         <Header
           eyebrow="Footage Agent"
-          title="Searching Pexels & Pixabay"
+          title="Sourcing Archival & Matched 1080p Footage"
           subtitle={`${ready} of ${job.clips.length} clips sourced · ${job.message}`}
         />
         <ClipGrid clips={job.clips} />
@@ -341,7 +416,7 @@ function StageView({ jobId }: { jobId: string }) {
   if (job.stage === "rendering" && job.renderSteps) {
     return (
       <div className="max-w-3xl">
-        <Header eyebrow="Render Engine" title="FFmpeg pipeline running" subtitle="1920×1080 · H.264 · AAC 192k · Ken Burns + xfade transitions" />
+        <Header eyebrow="Render Engine" title="FFmpeg 1080p pipeline running" subtitle="1920×1080 · H.264 · Ken Burns motion · EBU R128 mastered audio" />
         <RenderProgress steps={job.renderSteps} progress={job.renderProgress ?? 0} />
       </div>
     );

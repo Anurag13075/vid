@@ -19,6 +19,8 @@ export interface ScriptSection {
 export interface Script {
   sections: ScriptSection[];
   mood?: string;
+  sources?: string[];
+  tags?: string[];
 }
 
 export interface Clip {
@@ -42,6 +44,7 @@ export interface RenderStep {
 export interface Job {
   id: string;
   title: string;
+  topic?: string;
   voice: string;
   length: string;
   theme: string;
@@ -94,5 +97,28 @@ export async function createJob(opts: {
 export async function fetchJob(jobId: string): Promise<Job> {
   const res = await fetch(`/api/videos/${encodeURIComponent(jobId)}`);
   const data = await handleJsonResponse(res);
+  if (data && !data.topic && data.title) {
+    data.topic = data.title;
+  }
   return data as Job;
+}
+
+export async function cancelJob(jobId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/videos/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return !!data.ok;
+    }
+    // Fallback: DELETE endpoint
+    const delRes = await fetch(`/api/videos/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+    });
+    return delRes.ok;
+  } catch (err) {
+    console.warn("Failed to cancel job:", err);
+    return false;
+  }
 }

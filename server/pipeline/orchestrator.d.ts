@@ -1,3 +1,4 @@
+export declare function cancelVideoJob(videoId: string): Promise<boolean>;
 export declare function startPipeline(videoId: string): void;
 export declare function startIncrementalReRender(videoId: string, options: {
     affectedScenes?: number[];

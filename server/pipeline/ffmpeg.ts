@@ -234,12 +234,49 @@ export const FFPROBE_PATH = (() => {
 
 const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000;
 
+export interface FFmpegOptions {
+  videoId?: string;
+  signal?: AbortSignal;
+}
+
+// ─── Active Process Registry for Clean Job Cancellation ──────────────────────
+const activeProcesses = new Map<string, Set<any>>();
+
+export function killProcessesForVideo(videoId: string): void {
+  const procs = activeProcesses.get(videoId);
+  if (procs && procs.size > 0) {
+    console.log(`[ffmpeg] Killing ${procs.size} active FFmpeg process(es) for video ${videoId}`);
+    for (const proc of procs) {
+      try {
+        proc.kill("SIGKILL");
+      } catch {}
+    }
+    procs.clear();
+  }
+  activeProcesses.delete(videoId);
+}
+
 function runProcess(
   command: string,
-  args: string[]
+  args: string[],
+  options?: FFmpegOptions
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    if (options?.signal?.aborted) {
+      reject(new Error("FFmpeg aborted: operation was cancelled by user"));
+      return;
+    }
+
     const proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const videoId = options?.videoId;
+
+    if (videoId) {
+      if (!activeProcesses.has(videoId)) {
+        activeProcesses.set(videoId, new Set());
+      }
+      activeProcesses.get(videoId)!.add(proc);
+    }
+
     let stdout = "";
     let stderr = "";
 
@@ -251,12 +288,42 @@ function runProcess(
     });
 
     const timer = setTimeout(() => {
-      proc.kill("SIGKILL");
+      try { proc.kill("SIGKILL"); } catch {}
       reject(new Error(`${command} timed out after ${FFMPEG_TIMEOUT_MS / 1000}s`));
     }, FFMPEG_TIMEOUT_MS);
 
-    proc.on("close", (code) => {
+    const cleanup = () => {
       clearTimeout(timer);
+      if (options?.signal) {
+        options.signal.removeEventListener("abort", onAbort);
+      }
+      if (videoId) {
+        const set = activeProcesses.get(videoId);
+        if (set) {
+          set.delete(proc);
+          if (set.size === 0) activeProcesses.delete(videoId);
+        }
+      }
+    };
+
+    const onAbort = () => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {}
+      cleanup();
+      reject(new Error("FFmpeg aborted: job was cancelled by user"));
+    };
+
+    if (options?.signal) {
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    proc.on("close", (code, signal) => {
+      cleanup();
+      if (options?.signal?.aborted || signal === "SIGKILL" || signal === "SIGTERM") {
+        reject(new Error("FFmpeg process was cancelled by user"));
+        return;
+      }
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
@@ -265,15 +332,23 @@ function runProcess(
     });
 
     proc.on("error", (err) => {
-      clearTimeout(timer);
+      cleanup();
       reject(err);
     });
   });
 }
 
-export async function ffmpeg(args: string[]): Promise<void> {
+export async function ffmpeg(
+  args: string[],
+  optsOrVideoId?: string | FFmpegOptions
+): Promise<void> {
+  const options: FFmpegOptions | undefined =
+    typeof optsOrVideoId === "string"
+      ? { videoId: optsOrVideoId }
+      : optsOrVideoId;
+
   try {
-    await runProcess(FFMPEG_PATH, args);
+    await runProcess(FFMPEG_PATH, args, options);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`FFmpeg failed: ${message}\nCommand: ffmpeg ${args.join(" ")}`);

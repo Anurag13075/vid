@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { createVideo, getVideo, listVideos, updateVideo } from "../db.js";
-import { startPipeline, startIncrementalReRender } from "../pipeline/orchestrator.js";
+import { startPipeline, startIncrementalReRender, cancelVideoJob } from "../pipeline/orchestrator.js";
 import { VOICES } from "../pipeline/voiceover.js";
 import { interpretVoiceCommand } from "../pipeline/commandInterpreter.js";
 
@@ -247,13 +247,27 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
-// DELETE /api/videos/:id
+// POST /api/videos/:id/cancel — Explicit endpoint to cancel a video generation immediately
+router.post("/:id/cancel", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const cancelled = await cancelVideoJob(id);
+    res.json({ ok: true, cancelled });
+  } catch (err: any) {
+    console.error("Cancel video error:", err);
+    res.status(500).json({ error: err.message || "Failed to cancel video" });
+  }
+});
+
+// DELETE /api/videos/:id — Stop running processes, clean temp files, mark cancelled
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
-    await updateVideo(req.params.id as string, { stage: "error", message: "Deleted" });
-    res.json({ ok: true });
-  } catch {
-    res.status(500).json({ error: "Failed to delete video" });
+    const id = req.params.id as string;
+    const cancelled = await cancelVideoJob(id);
+    res.json({ ok: true, cancelled });
+  } catch (err: any) {
+    console.error("Delete/cancel video error:", err);
+    res.status(500).json({ error: "Failed to delete/cancel video" });
   }
 });
 

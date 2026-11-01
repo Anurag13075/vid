@@ -7,7 +7,7 @@ import { createClipTracker, findMultipleFootage, downloadClip } from "./footageA
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
 import { jobQueue } from "./queue.js";
-import { ffprobe } from "./ffmpeg.js";
+import { ffprobe, killProcessesForVideo } from "./ffmpeg.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 async function emit(videoId, event) {
     jobQueue.emit(videoId, event);
@@ -24,11 +24,42 @@ async function emit(videoId, event) {
         ...(event.errorMessage ? { error_message: event.errorMessage } : {}),
     });
 }
+// ─── Clean Cancellation of a Video Generation ──────────────────────────────
+export async function cancelVideoJob(videoId) {
+    console.log(`[orchestrator] Cancelling job for video: ${videoId}`);
+    // 1. Cancel in queue (aborts controller if running, removes from queue if waiting)
+    const queueResult = jobQueue.cancel(videoId);
+    // 2. Kill all spawned FFmpeg / child processes for this video immediately
+    killProcessesForVideo(videoId);
+    // 3. Immediately clean up disk temp directory to free disk space and eliminate clutter
+    const vidrushTmp = getTempDir();
+    const jobTmp = path.join(vidrushTmp, videoId);
+    try {
+        await fs.rm(jobTmp, { recursive: true, force: true });
+        console.log(`[orchestrator] Cleaned temp dir for cancelled job: ${jobTmp}`);
+    }
+    catch { }
+    // 4. Update DB state
+    await updateVideo(videoId, {
+        stage: "error",
+        progress: 0,
+        message: "Generation cancelled by user.",
+        error_message: "Job cancelled by user",
+    });
+    // 5. Emit SSE event so frontend updates instantly
+    jobQueue.emit(videoId, {
+        stage: "error",
+        progress: 0,
+        message: "Generation cancelled by user.",
+        errorMessage: "Job cancelled by user",
+    });
+    return queueResult.cancelled;
+}
 // ─── Standard Fresh Pipeline Run ────────────────────────────────────────────
 export function startPipeline(videoId) {
-    jobQueue.enqueue(videoId, () => runPipeline(videoId));
+    jobQueue.enqueue(videoId, (signal) => runPipeline(videoId, signal));
 }
-async function runPipeline(videoId) {
+async function runPipeline(videoId, signal) {
     const video = await getVideo(videoId);
     if (!video)
         return;
@@ -37,6 +68,8 @@ async function runPipeline(videoId) {
     const jobTmp = path.join(vidrushTmp, videoId);
     await fs.mkdir(jobTmp, { recursive: true });
     try {
+        if (signal?.aborted)
+            throw new Error("Job cancelled by user");
         // ── Phase 1: Script generation ──────────────────────────────────────
         await emit(videoId, {
             stage: "researching",
@@ -64,6 +97,8 @@ async function runPipeline(videoId) {
         });
         const audioPaths = [];
         for (let i = 0; i < script.sections.length; i++) {
+            if (signal?.aborted)
+                throw new Error("Job cancelled by user");
             const section = script.sections[i];
             const pct = 32 + Math.round((i / script.sections.length) * 18);
             if (!section.narration.trim() && section.section_type !== "graphic") {
@@ -81,11 +116,16 @@ async function runPipeline(videoId) {
                 });
             }
             catch (err) {
+                if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
+                    throw err;
+                }
                 console.error(`Voiceover failed for section ${section.id}:`, err.message);
                 audioPaths.push(null);
             }
         }
         // ── Phase 3: Footage Search & Download ──────────────────────────────
+        if (signal?.aborted)
+            throw new Error("Job cancelled by user");
         const usedIds = createClipTracker();
         const clips = script.sections.map((s) => ({
             id: s.id,
@@ -106,6 +146,8 @@ async function runPipeline(videoId) {
         });
         const footagePathsPerSection = new Array(script.sections.length).fill(null);
         for (let i = 0; i < script.sections.length; i++) {
+            if (signal?.aborted)
+                throw new Error("Job cancelled by user");
             const section = script.sections[i];
             if (section.section_type === "graphic" || !section.narration.trim() || !audioPaths[i]) {
                 continue;
@@ -123,6 +165,8 @@ async function runPipeline(videoId) {
                 if (foundClips.length > 0) {
                     const downloadedPaths = [];
                     for (let ci = 0; ci < foundClips.length; ci++) {
+                        if (signal?.aborted)
+                            throw new Error("Job cancelled by user");
                         try {
                             const p = await downloadClip(foundClips[ci], videoId, `${section.id}_${ci}`);
                             downloadedPaths.push(p);
@@ -139,13 +183,42 @@ async function runPipeline(videoId) {
                 }
             }
             catch (err) {
+                if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
+                    throw err;
+                }
                 clips[i] = { ...clips[i], status: "failed" };
             }
         }
         // ── Phase 4: Assembly & Publishing Delivery ─────────────────────────
-        await renderVideoAssembly(videoId, title, script.sections, audioPaths, footagePathsPerSection, theme, script.mood, clips, script);
+        if (signal?.aborted)
+            throw new Error("Job cancelled by user");
+        await renderVideoAssembly(videoId, title, script.sections, audioPaths, footagePathsPerSection, theme, script.mood, clips, script, signal);
     }
     catch (err) {
+        const isCancelled = signal?.aborted ||
+            err?.message?.includes("cancelled") ||
+            err?.message?.includes("aborted");
+        if (isCancelled) {
+            console.log(`[orchestrator] Video ${videoId} generation cancelled cleanly.`);
+            killProcessesForVideo(videoId);
+            try {
+                await fs.rm(jobTmp, { recursive: true, force: true });
+            }
+            catch { }
+            await updateVideo(videoId, {
+                stage: "error",
+                progress: 0,
+                message: "Generation cancelled by user.",
+                error_message: "Job cancelled by user",
+            });
+            jobQueue.emit(videoId, {
+                stage: "error",
+                progress: 0,
+                message: "Generation cancelled by user.",
+                errorMessage: "Job cancelled by user",
+            });
+            return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`Pipeline failed for ${videoId}:`, err);
         await emit(videoId, {
@@ -158,9 +231,11 @@ async function runPipeline(videoId) {
 }
 // ─── Incremental Partial Re-render Pipeline ─────────────────────────────────
 export function startIncrementalReRender(videoId, options) {
-    jobQueue.enqueue(videoId, () => runIncrementalPipeline(videoId, options));
+    jobQueue.enqueue(videoId, (signal) => runIncrementalPipeline(videoId, options, signal));
 }
-async function runIncrementalPipeline(videoId, options) {
+async function runIncrementalPipeline(videoId, options, signal) {
+    if (signal?.aborted)
+        return;
     const video = await getVideo(videoId);
     if (!video)
         return;
@@ -254,7 +329,9 @@ async function runIncrementalPipeline(videoId, options) {
         }
     }
     // 3. Fast Re-assembly
-    await renderVideoAssembly(videoId, video.title, script.sections, audioPaths, footagePathsPerSection, currentTheme, script.mood, clips, script);
+    if (signal?.aborted)
+        return;
+    await renderVideoAssembly(videoId, video.title, script.sections, audioPaths, footagePathsPerSection, currentTheme, script.mood, clips, script, signal);
 }
 // ─── Generate Standalone SRT Subtitles for YouTube ──────────────────────────
 async function generateSrtFile(sections, audioPaths, srtPath) {
@@ -319,7 +396,9 @@ function formatSourcesFile(title, sources, clips) {
     return content;
 }
 // ─── Shared Assemble Step & YouTube Delivery Package ────────────────────────
-async function renderVideoAssembly(videoId, title, sections, audioPaths, footagePathsPerSection, theme, mood, clips, script) {
+async function renderVideoAssembly(videoId, title, sections, audioPaths, footagePathsPerSection, theme, mood, clips, script, signal) {
+    if (signal?.aborted)
+        throw new Error("Job cancelled by user");
     const renderSteps = RENDER_STEPS.map((s) => ({ ...s }));
     await emit(videoId, {
         stage: "rendering",
@@ -335,6 +414,8 @@ async function renderVideoAssembly(videoId, title, sections, audioPaths, footage
     const bgmPath = null;
     const validAudioPaths = sections.map((_, i) => audioPaths[i] || null);
     const { videoPath, thumbPath } = await assemble(videoId, title, sections, validAudioPaths, footagePathsPerSection, bgmPath, outputDir, async (step, total, label) => {
+        if (signal?.aborted)
+            throw new Error("Job cancelled by user");
         const updatedSteps = renderSteps.map((s, idx) => ({ ...s, done: idx < step }));
         if (step < renderSteps.length)
             updatedSteps[step].done = false;
@@ -349,7 +430,7 @@ async function renderVideoAssembly(videoId, title, sections, audioPaths, footage
             renderSteps: updatedSteps,
             renderProgress: renderPct,
         });
-    }, theme);
+    }, theme, signal);
     // Probe actual final video duration
     const actualDuration = Math.round(await ffprobe(videoPath)) || 120;
     // 1. YouTube Subtitles (.srt)

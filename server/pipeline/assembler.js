@@ -150,7 +150,7 @@ function buildKenBurnsFilter(motion, durationSec) {
     }
 }
 // ─── Render One Cut (Stream Loop Enabled to Prevent Duration Truncation) ────
-async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter, isSectionStart = false, isSectionEnd = false) {
+async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter, isSectionStart = false, isSectionEnd = false, options) {
     let transitionFilter = "";
     if (isSectionStart && durationSec > 1.2) {
         transitionFilter = ",fade=t=in:st=0:d=0.30";
@@ -172,10 +172,10 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
         "-g", "30", "-keyint_min", "30",
         "-video_track_timescale", "30000",
         "-an", "-y", outPath,
-    ]);
+    ], options);
 }
 // ─── Dark Gradient Scene Fallback ────────────────────────────────────────────
-async function makeDarkSceneClip(outPath, durationSec) {
+async function makeDarkSceneClip(outPath, durationSec, options) {
     await ffmpeg([
         "-f", "lavfi",
         "-i", `color=c=0x0a0c12:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
@@ -186,7 +186,7 @@ async function makeDarkSceneClip(outPath, durationSec) {
         "-g", "30", "-keyint_min", "30",
         "-video_track_timescale", "30000",
         "-an", "-y", outPath,
-    ]);
+    ], options);
 }
 // ─── Cut Slicer (Ensures Cuts Sum Exactly to Audio Track Duration) ───────────
 function sliceCuts(audioDuration) {
@@ -373,7 +373,7 @@ ${events}`;
     await fs.writeFile(assPath, assContent, "utf8");
 }
 // ─── Concat All Cuts Safely (Zero Duration Truncation) ───────────────────────
-async function joinAllCuts(clipPaths, outputPath) {
+async function joinAllCuts(clipPaths, outputPath, options) {
     if (clipPaths.length === 0)
         throw new Error("No cuts to join");
     if (clipPaths.length === 1) {
@@ -392,11 +392,11 @@ async function joinAllCuts(clipPaths, outputPath) {
         "-fflags", "+genpts",
         "-avoid_negative_ts", "make_zero",
         "-y", outputPath,
-    ]);
+    ], options);
     await fs.unlink(listPath).catch(() => { });
 }
 // ─── Merge Voiceover Audio ──────────────────────────────────────────────────
-async function mergeAudio(audioPaths, outputPath) {
+async function mergeAudio(audioPaths, outputPath, options) {
     if (audioPaths.length === 0) {
         await ffmpeg([
             "-f", "lavfi",
@@ -405,7 +405,7 @@ async function mergeAudio(audioPaths, outputPath) {
             "-c:a", "aac",
             "-b:a", "192k",
             "-y", outputPath,
-        ]);
+        ], options);
         return;
     }
     if (audioPaths.length === 1) {
@@ -423,10 +423,10 @@ async function mergeAudio(audioPaths, outputPath) {
         "-b:a", "192k",
         "-ar", "44100",
         "-y", outputPath,
-    ]);
+    ], options);
 }
 // ─── Final Production Mix (Drawtext + Drawbox + ASS Subtitles) ───────────────
-async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, outputPath, videoTitle, sectionTimings, accentHex) {
+async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, outputPath, videoTitle, sectionTimings, accentHex, options) {
     const caps = getFFmpegCapabilities();
     const font = await resolveFont();
     const vfFilters = [];
@@ -470,7 +470,7 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
             "-movflags", "+faststart",
             "-y", outputPath,
-        ]);
+        ], options);
     }
     else {
         await ffmpeg([
@@ -484,18 +484,18 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
             "-movflags", "+faststart",
             "-y", outputPath,
-        ]);
+        ], options);
     }
 }
 // ─── Thumbnail Extraction ────────────────────────────────────────────────────
-async function extractThumbnail(videoPath, thumbPath) {
+async function extractThumbnail(videoPath, thumbPath, options) {
     await ffmpeg([
         "-ss", "3.5",
         "-i", videoPath,
         "-vframes", "1",
         "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
         "-y", thumbPath,
-    ]);
+    ], options);
 }
 // ─── Step Manifest ───────────────────────────────────────────────────────────
 export const RENDER_STEPS = [
@@ -529,10 +529,13 @@ function makeSectionClipResolver(footagePathsPerSection, globalPool) {
     };
 }
 // ─── Main Assembly Entry Point ──────────────────────────────────────────────
-export async function assemble(videoId, videoTitle, sections, audioPaths, footagePathsPerSection, bgmPath, outputDir, onProgress, theme) {
+export async function assemble(videoId, videoTitle, sections, audioPaths, footagePathsPerSection, bgmPath, outputDir, onProgress, theme, signal) {
     const tmpDir = getTempDir(videoId);
     await fs.mkdir(tmpDir, { recursive: true });
     await fs.mkdir(outputDir, { recursive: true });
+    const opts = { videoId, signal };
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     const { gradeFilter, captionAccent } = resolveTheme(theme);
     const caps = getFFmpegCapabilities();
     console.log(`[assembler] Starting assemble: theme="${theme ?? "standard"}" drawtext=${caps.hasDrawtext}`);
@@ -550,12 +553,16 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     console.log(`[assembler] Global pool has ${globalPool.length} clips`);
     const getSectionClips = makeSectionClipResolver(footagePathsPerSection, globalPool);
     // ── Step 1: Plan Cuts & Exact Section Timings ─────────────────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(0, total, RENDER_STEPS[0].label);
     const cutPlan = [];
     const validAudio = [];
     const sectionTimings = [];
     let runningTime = 0;
     for (let i = 0; i < sections.length; i++) {
+        if (signal?.aborted)
+            throw new Error("Assembly cancelled by user");
         const ap = audioPaths[i];
         if (!ap) {
             cutPlan.push([]);
@@ -587,6 +594,8 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     const totalPlannedCuts = cutPlan.reduce((s, c) => s + c.length, 0);
     console.log(`[assembler] Planned ${totalPlannedCuts} cuts across ${sections.length} sections (${runningTime.toFixed(1)}s total)`);
     // ── Step 2: Render 1080p Cuts with Ken Burns Motion ───────────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(1, total, RENDER_STEPS[1].label);
     const renderedCuts = [];
     let motionIdx = 0;
@@ -595,21 +604,26 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
         if (!cuts || cuts.length === 0)
             continue;
         for (let ci = 0; ci < cuts.length; ci++) {
+            if (signal?.aborted)
+                throw new Error("Assembly cancelled by user");
             const { clipPath, durationSec, isSectionStart, isSectionEnd } = cuts[ci];
             const motion = MOTION_CYCLE[motionIdx++ % MOTION_CYCLE.length];
             const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
             if (!clipPath) {
-                await makeDarkSceneClip(outPath, durationSec);
+                await makeDarkSceneClip(outPath, durationSec, opts);
                 renderedCuts.push(outPath);
                 continue;
             }
             try {
-                await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd);
+                await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
                 renderedCuts.push(outPath);
             }
             catch (err) {
+                if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
+                    throw err;
+                }
                 console.warn(`[assembler] Cut render failed (${i}_${ci}), falling back to safe clip: ${err.message}`);
-                await makeDarkSceneClip(outPath, durationSec);
+                await makeDarkSceneClip(outPath, durationSec, opts);
                 renderedCuts.push(outPath);
             }
         }
@@ -618,10 +632,14 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
         throw new Error("No video cuts were rendered — check audio generation");
     }
     // ── Step 3: Merge Voiceover Tracks ────────────────────────────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(2, total, RENDER_STEPS[2].label);
     const mergedAudio = path.join(tmpDir, "voiceover_merged.aac");
-    await mergeAudio(validAudio, mergedAudio);
+    await mergeAudio(validAudio, mergedAudio, opts);
     // ── Step 4: Generate ASS Broadcast Subtitles & Graphics ───────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(3, total, RENDER_STEPS[3].label);
     const assPath = path.join(tmpDir, "subtitles.ass");
     let assExists = false;
@@ -635,10 +653,14 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
         console.warn("[assembler] ASS subtitle generation error:", err.message);
     }
     // ── Step 5: Join All Cuts into Full Video Timeline ────────────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(4, total, RENDER_STEPS[4].label);
     const joinedVideo = path.join(tmpDir, "timeline_joined.mp4");
-    await joinAllCuts(renderedCuts, joinedVideo);
+    await joinAllCuts(renderedCuts, joinedVideo, opts);
     // ── Sync Verification: Guarantee Video Duration Matches Audio Exactly ────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     const audioDuration = await getExactDuration(mergedAudio);
     const videoDuration = await getExactDuration(joinedVideo);
     console.log(`[assembler] Sync verification: Video=${videoDuration.toFixed(2)}s, Audio=${audioDuration.toFixed(2)}s`);
@@ -654,17 +676,21 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
             "-pix_fmt", "yuv420p",
             "-r", String(FPS),
             "-y", paddedVideo,
-        ]);
+        ], opts);
         syncedVideo = paddedVideo;
     }
     // ── Step 6: Master Audio & Final Video Render ─────────────────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(5, total, RENDER_STEPS[5].label);
     const finalMp4 = path.join(outputDir, "final.mp4");
-    await finalProductionMix(syncedVideo, mergedAudio, bgmPath, assExists ? assPath : null, finalMp4, videoTitle, sectionTimings, captionAccent);
+    await finalProductionMix(syncedVideo, mergedAudio, bgmPath, assExists ? assPath : null, finalMp4, videoTitle, sectionTimings, captionAccent, opts);
     // ── Step 7: Thumbnail Extraction ──────────────────────────────────────────
+    if (signal?.aborted)
+        throw new Error("Assembly cancelled by user");
     await onProgress(6, total, RENDER_STEPS[6].label);
     const thumbPath = path.join(outputDir, "thumb.jpg");
-    await extractThumbnail(finalMp4, thumbPath);
+    await extractThumbnail(finalMp4, thumbPath, opts);
     // Rolling cleanup: remove cut files and intermediate timeline
     for (const cut of renderedCuts) {
         await fs.unlink(cut).catch(() => { });
