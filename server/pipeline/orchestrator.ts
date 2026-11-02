@@ -181,21 +181,31 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
 
       try {
         const foundClips = await findMultipleFootage(section, 6, videoId, usedIds, title);
+        const downloadedPaths: string[] = [];
         if (foundClips.length > 0) {
-          const downloadedPaths: string[] = [];
           for (let ci = 0; ci < foundClips.length; ci++) {
             if (signal?.aborted) throw new Error("Job cancelled by user");
             try {
               const p = await downloadClip(foundClips[ci], videoId, `${section.id}_${ci}`);
               downloadedPaths.push(p);
-            } catch (dlErr) {}
+            } catch (dlErr: any) {
+              console.warn(`[orchestrator] Clip download failed (${section.id}_${ci}):`, dlErr?.message);
+            }
           }
+        }
 
-          if (downloadedPaths.length > 0) {
-            clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
-            footagePathsPerSection[i] = downloadedPaths;
+        if (downloadedPaths.length > 0) {
+          clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
+          footagePathsPerSection[i] = downloadedPaths;
+        } else {
+          // If no clips were downloaded for this section, reuse valid clips from prior sections
+          const prior = footagePathsPerSection.slice(0, i).filter((p): p is string[] => !!p && p.length > 0).flat();
+          if (prior.length > 0) {
+            console.log(`[orchestrator] Reusing ${prior.length} footage clips for Scene ${i + 1}`);
+            footagePathsPerSection[i] = [...prior];
+            clips[i] = { ...(clips[i] || {}), status: "ready", localPath: prior[0] } as any;
           } else {
-            clips[i] = { ...clips[i], status: "failed" };
+            clips[i] = { ...(clips[i] || {}), status: "failed" } as any;
           }
         }
       } catch (err: any) {
@@ -377,7 +387,9 @@ async function runIncrementalPipeline(
         try {
           const p = await downloadClip(found[ci], videoId, `${section.id}_${ci}`);
           dlPaths.push(p);
-        } catch {}
+        } catch (dlErr: any) {
+          console.warn(`[orchestrator] Re-render clip download failed (${section.id}_${ci}):`, dlErr?.message);
+        }
       }
       footagePathsPerSection[i] = dlPaths.length > 0 ? dlPaths : validExisting;
     } else {

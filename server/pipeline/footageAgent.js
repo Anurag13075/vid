@@ -12,15 +12,20 @@ function pickBestPexelsFile(videoFiles) {
     const valid = (videoFiles || []).filter((f) => f?.link && f?.width);
     if (valid.length === 0)
         return "";
-    // Prioritize 1080p full HD, then 720p
-    valid.sort((a, b) => Math.abs(a.width - 1920) - Math.abs(b.width - 1920));
+    // Prioritize 720p (width ~1280) and 1080p (width ~1920) which are 3-10MB, avoid massive 4K files
+    const hd = valid.filter((f) => f.width <= 1920 && f.width >= 960);
+    if (hd.length > 0) {
+        hd.sort((a, b) => Math.abs(a.width - 1280) - Math.abs(b.width - 1280));
+        return hd[0].link;
+    }
+    valid.sort((a, b) => a.width - b.width);
     return valid[0].link;
 }
 function pickBestPixabayUrl(hit) {
-    return (hit?.videos?.large?.url ||
-        hit?.videos?.medium?.url ||
+    return (hit?.videos?.tiny?.url ||
         hit?.videos?.small?.url ||
-        hit?.videos?.tiny?.url ||
+        hit?.videos?.medium?.url ||
+        hit?.videos?.large?.url ||
         "");
 }
 const STOP_WORDS = new Set([
@@ -279,42 +284,30 @@ export async function findMultipleFootage(section, limit, videoId, usedIds, titl
     console.log(`[footage] Section ${section.id} ("${keywordsToTry[0]}"): ${clips.length}/${clipsNeeded} clips found`);
     return clips;
 }
-function downloadUrlToFile(url, destPath, timeoutMs = 35000) {
-    return new Promise((resolve, reject) => {
-        const fileStream = createWriteStream(destPath);
-        const client = url.startsWith("https") ? https : http;
-        const request = client.get(url, {
+async function downloadUrlToFile(url, destPath, timeoutMs = 35000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             },
-        }, (res) => {
-            if (res.statusCode &&
-                [301, 302, 303, 307, 308].includes(res.statusCode) &&
-                res.headers.location) {
-                fileStream.close();
-                return downloadUrlToFile(res.headers.location, destPath, timeoutMs).then(resolve).catch(reject);
-            }
-            if (res.statusCode && res.statusCode >= 400) {
-                fileStream.close();
-                return reject(new Error(`Download failed with HTTP ${res.statusCode}`));
-            }
-            res.pipe(fileStream);
-            fileStream.on("finish", () => {
-                fileStream.close(() => resolve());
-            });
+            signal: controller.signal,
+            redirect: "follow",
         });
-        request.on("error", (err) => {
-            fileStream.close();
-            fs.unlink(destPath).catch(() => { });
-            reject(err);
-        });
-        request.setTimeout(timeoutMs, () => {
-            request.destroy();
-            fileStream.close();
-            fs.unlink(destPath).catch(() => { });
-            reject(new Error(`Download timed out after ${timeoutMs / 1000}s`));
-        });
-    });
+        if (!res.ok) {
+            throw new Error(`Download failed with HTTP ${res.status}`);
+        }
+        const arrayBuffer = await res.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        if (buffer.length < 2000) {
+            throw new Error(`Downloaded buffer too small (${buffer.length} bytes)`);
+        }
+        await fs.writeFile(destPath, buffer);
+    }
+    finally {
+        clearTimeout(timer);
+    }
 }
 export async function downloadClip(clip, videoId, suffix) {
     const tmpDir = getTempDir(videoId);
@@ -334,8 +327,10 @@ export async function downloadClip(clip, videoId, suffix) {
             throw new Error(`Downloaded file too small (${stat?.size ?? 0} bytes)`);
         }
         catch (err) {
-            if (attempt === 3)
+            if (attempt === 3) {
+                console.warn(`[footage] Failed download after 3 attempts (${clip.externalId}):`, err?.message);
                 throw err;
+            }
             await new Promise((r) => setTimeout(r, 1000 * attempt));
         }
     }

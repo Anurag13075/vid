@@ -39,9 +39,9 @@ export function probeBinaryCapabilities(binPath) {
         const filtersOutput = (fRes.stdout || "") + (fRes.stderr || "");
         // Parse filters list
         for (const line of filtersOutput.split(/\r?\n/)) {
-            const match = line.match(/^\s*[T.][S.][C.]\s+([a-zA-Z0-9_-]+)/);
+            const match = line.match(/^\s*([T.SCN| ]{2,5})\s+([a-zA-Z0-9_-]+)/);
             if (match) {
-                result.filters.add(match[1].toLowerCase());
+                result.filters.add(match[2].toLowerCase());
             }
         }
         // Explicit filter verification
@@ -132,10 +132,14 @@ export function getFFmpegCapabilities() {
     const candidates = findCandidateBinaries();
     console.log(`[ffmpeg] Scanning ${candidates.length} candidate binaries for drawtext & filter capabilities...`);
     let bestMatch = null;
+    let firstWorking = null;
     for (const candidate of candidates) {
         const caps = probeBinaryCapabilities(candidate);
         console.log(`[ffmpeg] Binary: ${candidate} [v${caps.version}] ` +
             `drawtext=${caps.hasDrawtext} drawbox=${caps.hasDrawbox} overlay=${caps.hasOverlay} ass=${caps.hasAss} fontconfig=${caps.hasFontconfig}`);
+        if (!firstWorking && caps.version !== "unknown") {
+            firstWorking = caps;
+        }
         // Prioritize binaries with drawtext, drawbox, and overlay
         if (caps.hasDrawtext && caps.hasDrawbox && caps.hasOverlay) {
             bestMatch = caps;
@@ -147,10 +151,15 @@ export function getFFmpegCapabilities() {
             bestMatch = caps;
         }
     }
-    // If no candidate was probed or none matched, fallback to system "ffmpeg"
+    // If no candidate was probed or none matched, fallback to first working binary or system "ffmpeg"
     if (!bestMatch) {
-        bestMatch = probeBinaryCapabilities("ffmpeg");
-        bestMatch.binaryPath = "ffmpeg";
+        if (firstWorking) {
+            bestMatch = firstWorking;
+            console.log(`[ffmpeg] Using working candidate binary as fallback: ${firstWorking.binaryPath}`);
+        } else {
+            bestMatch = probeBinaryCapabilities("ffmpeg");
+            bestMatch.binaryPath = "ffmpeg";
+        }
     }
     cachedCapabilities = bestMatch;
     return bestMatch;

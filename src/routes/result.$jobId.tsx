@@ -246,14 +246,15 @@ export function ResultPage() {
   const { jobId } = Route.useParams();
   const navigate = useNavigate();
   const fetchedJob = useJob(jobId);
+  const isDemo = jobId === "demo" || jobId === "showcase";
 
   const job =
-    jobId === "demo" || jobId === "showcase" || !fetchedJob?.script
+    isDemo
       ? (DEMO_JOB as any)
-      : fetchedJob;
+      : (fetchedJob || { id: jobId, title: "Rendering...", voice: "Brian", length: "medium", theme: "cinematic", background: "gradient_dark", mode: "auto", stage: "queued", progress: 0, message: "Loading video project...", script: null, clips: [], videoUrl: "", thumbnailUrl: "" } as any);
 
-  const scriptData = job.script || DEMO_JOB.script;
-  const videoUrl = job.videoUrl || "/The-Complete-History-SnapYT.App.mp4";
+  const scriptData = job.script || (isDemo ? DEMO_JOB.script : { title: job.title || "Video", sections: [] });
+  const videoUrl = job.videoUrl || (isDemo ? "/The-Complete-History-SnapYT.App.mp4" : "");
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const part2VideoRef = useRef<HTMLVideoElement | null>(null);
@@ -522,7 +523,7 @@ export function ResultPage() {
       if (clean.includes("download video") || clean.includes("download this video") || clean.includes("download mp4") || clean.includes("export video")) {
         const link = document.createElement("a");
         link.href = videoUrl;
-        link.download = "VidRush-Secrets-of-the-Ancient-World.mp4";
+        link.download = `${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}.mp4`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -1146,19 +1147,34 @@ export function ResultPage() {
               : "aspect-video"
           }`}
         >
-          <video
-            ref={videoRef}
-            key={videoUrl}
-            src={videoUrl}
-            controls
-            playsInline
-            poster={job.thumbnailUrl || "/videos/demo/thumb.jpg"}
-            className="w-full h-full object-cover transition-all duration-500 ease-out"
-            style={{
-              filter: activeGradeObj.filter,
-              transform: `scale(${zoomScale})`,
-            }}
-          />
+          {!videoUrl && !isDemo && job.stage !== "done" ? (
+            <div className="w-full h-full min-h-[380px] flex flex-col items-center justify-center p-8 text-center bg-zinc-950/90">
+              <Loader2 className="w-10 h-10 animate-spin text-purple-400 mb-4" />
+              <h3 className="text-lg font-semibold text-white">Video Rendering in Progress ({job.progress || 0}%)</h3>
+              <p className="text-sm text-zinc-400 mt-2 max-w-md">{job.message || "Generating script, voiceover audio, and visual scene cuts..."}</p>
+              <Link
+                to="/generate/$jobId"
+                params={{ jobId }}
+                className="mt-5 px-4 py-2 bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 rounded-lg text-xs font-mono transition-colors"
+              >
+                Open Live Pipeline Dashboard →
+              </Link>
+            </div>
+          ) : (
+            <video
+              ref={videoRef}
+              key={videoUrl}
+              src={videoUrl}
+              controls
+              playsInline
+              poster={job.thumbnailUrl || (isDemo ? "/videos/demo/thumb.jpg" : undefined)}
+              className="w-full h-full object-cover transition-all duration-500 ease-out"
+              style={{
+                filter: activeGradeObj.filter,
+                transform: `scale(${zoomScale})`,
+              }}
+            />
+          )}
 
           {/* Real-Time Radial Vignette Layer */}
           {hasVignette && (
@@ -1242,7 +1258,7 @@ export function ResultPage() {
           <div className="flex flex-wrap items-center gap-2.5">
             <a
               href={videoUrl}
-              download="The-Complete-History-SnapYT.App.mp4"
+              download={`${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}.mp4`}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 transition-all font-medium text-white shadow-lg shadow-purple-600/30 text-[13px] active:scale-95"
             >
               <Download className="h-4 w-4" />

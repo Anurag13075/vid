@@ -16,17 +16,22 @@ export function createClipTracker(): Set<string> {
 function pickBestPexelsFile(videoFiles: any[]): string {
   const valid = (videoFiles || []).filter((f: any) => f?.link && f?.width);
   if (valid.length === 0) return "";
-  // Prioritize 1080p full HD, then 720p
-  valid.sort((a: any, b: any) => Math.abs(a.width - 1920) - Math.abs(b.width - 1920));
+  // Prioritize 720p (width ~1280) and 1080p (width ~1920) which are 3-10MB, avoid massive 4K files
+  const hd = valid.filter((f: any) => f.width <= 1920 && f.width >= 960);
+  if (hd.length > 0) {
+    hd.sort((a: any, b: any) => Math.abs(a.width - 1280) - Math.abs(b.width - 1280));
+    return hd[0].link;
+  }
+  valid.sort((a: any, b: any) => a.width - b.width);
   return valid[0].link;
 }
 
 function pickBestPixabayUrl(hit: any): string {
   return (
-    hit?.videos?.large?.url ||
-    hit?.videos?.medium?.url ||
-    hit?.videos?.small?.url ||
     hit?.videos?.tiny?.url ||
+    hit?.videos?.small?.url ||
+    hit?.videos?.medium?.url ||
+    hit?.videos?.large?.url ||
     ""
   );
 }
@@ -333,53 +338,33 @@ export async function findMultipleFootage(
   return clips;
 }
 
-function downloadUrlToFile(url: string, destPath: string, timeoutMs = 35000): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const fileStream = createWriteStream(destPath);
-    const client = url.startsWith("https") ? https : http;
+async function downloadUrlToFile(url: string, destPath: string, timeoutMs = 35000): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const request = client.get(
-      url,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        },
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
-      (res) => {
-        if (
-          res.statusCode &&
-          [301, 302, 303, 307, 308].includes(res.statusCode) &&
-          res.headers.location
-        ) {
-          fileStream.close();
-          return downloadUrlToFile(res.headers.location, destPath, timeoutMs).then(resolve).catch(reject);
-        }
-
-        if (res.statusCode && res.statusCode >= 400) {
-          fileStream.close();
-          return reject(new Error(`Download failed with HTTP ${res.statusCode}`));
-        }
-
-        res.pipe(fileStream);
-        fileStream.on("finish", () => {
-          fileStream.close(() => resolve());
-        });
-      }
-    );
-
-    request.on("error", (err) => {
-      fileStream.close();
-      fs.unlink(destPath).catch(() => {});
-      reject(err);
+      signal: controller.signal,
+      redirect: "follow",
     });
 
-    request.setTimeout(timeoutMs, () => {
-      request.destroy();
-      fileStream.close();
-      fs.unlink(destPath).catch(() => {});
-      reject(new Error(`Download timed out after ${timeoutMs / 1000}s`));
-    });
-  });
+    if (!res.ok) {
+      throw new Error(`Download failed with HTTP ${res.status}`);
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    if (buffer.length < 2000) {
+      throw new Error(`Downloaded buffer too small (${buffer.length} bytes)`);
+    }
+
+    await fs.writeFile(destPath, buffer);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function downloadClip(
@@ -404,7 +389,10 @@ export async function downloadClip(
       }
       throw new Error(`Downloaded file too small (${stat?.size ?? 0} bytes)`);
     } catch (err: any) {
-      if (attempt === 3) throw err;
+      if (attempt === 3) {
+        console.warn(`[footage] Failed download after 3 attempts (${clip.externalId}):`, err?.message);
+        throw err;
+      }
       await new Promise((r) => setTimeout(r, 1000 * attempt));
     }
   }

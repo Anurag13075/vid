@@ -98,44 +98,37 @@ function escapeFilterPath(filePath) {
 function buildKenBurnsFilter(motion, durationSec) {
     const totalFrames = Math.max(Math.ceil(durationSec * FPS), 2);
     const denom = totalFrames - 1;
-    const w = OUTPUT_WIDTH;
-    const h = OUTPUT_HEIGHT;
-    const SCALE = 1.12;
-    const sw = Math.round(w * SCALE);
-    const sh = Math.round(h * SCALE);
-    const dx = sw - w;
-    const dy = sh - h;
-    const prog = `(min(n,${denom})/${denom})`;
-    const baseScale = `scale=${sw}:${sh}:force_original_aspect_ratio=increase,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:color=black`;
+    const prog = `(min(n\\,${denom})/${denom})`;
+    const base = `scale=2112:1188:force_original_aspect_ratio=increase,crop=2112:1188`;
     switch (motion) {
-        case "zoom-in": {
-            const cW = `${sw}-${dx}*${prog}`, cH = `${sh}-${dy}*${prog}`;
-            return `${baseScale},crop='${cW}':'${cH}':'(${sw}-(${cW}))/2':'(${sh}-(${cH}))/2',scale=${w}:${h}`;
-        }
-        case "zoom-out": {
-            const cW = `${w}+${dx}*${prog}`, cH = `${h}+${dy}*${prog}`;
-            return `${baseScale},crop='${cW}':'${cH}':'(${sw}-(${cW}))/2':'(${sh}-(${cH}))/2',scale=${w}:${h}`;
-        }
+        case "zoom-in":
+            return `${base},crop=w=2112-192*${prog}:h=1188-108*${prog}:x=96*${prog}:y=54*${prog},scale=1920:1080`;
+        case "zoom-out":
+            return `${base},crop=w=1920+192*${prog}:h=1080+108*${prog}:x=96*(1-${prog}):y=54*(1-${prog}),scale=1920:1080`;
         case "pan-right":
-            return `${baseScale},crop=${w}:${h}:'${dx}*${prog}':${Math.floor(dy / 2)}`;
+            return `${base},crop=w=1920:h=1080:x=192*${prog}:y=54`;
         case "pan-left":
-            return `${baseScale},crop=${w}:${h}:'${dx}*(1-${prog})':${Math.floor(dy / 2)}`;
-        case "pan-up":
-            return `${baseScale},crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*${prog}'`;
+            return `${base},crop=w=1920:h=1080:x=192*(1-${prog}):y=54`;
         case "pan-down":
-            return `${baseScale},crop=${w}:${h}:${Math.floor(dx / 2)}:'${dy}*(1-${prog})'`;
+            return `${base},crop=w=1920:h=1080:x=96:y=108*${prog}`;
+        case "pan-up":
+            return `${base},crop=w=1920:h=1080:x=96:y=108*(1-${prog})`;
     }
 }
 // ─── Render One Cut (Stream Loop Enabled to Prevent Duration Truncation) ────
 async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter, isSectionStart = false, isSectionEnd = false, options) {
+    const caps = getFFmpegCapabilities();
     let transitionFilter = "";
-    if (isSectionStart && durationSec > 1.2) {
-        transitionFilter = ",fade=t=in:st=0:d=0.30";
+    if (caps.filters.has("fade")) {
+        if (isSectionStart && durationSec > 1.2) {
+            transitionFilter = ",fade=t=in:st=0:d=0.30";
+        }
+        else if (isSectionEnd && durationSec > 1.2) {
+            transitionFilter = `,fade=t=out:st=${(durationSec - 0.30).toFixed(2)}:d=0.30`;
+        }
     }
-    else if (isSectionEnd && durationSec > 1.2) {
-        transitionFilter = `,fade=t=out:st=${(durationSec - 0.30).toFixed(2)}:d=0.30`;
-    }
-    const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)},${gradeFilter}${transitionFilter},format=yuv420p`;
+    const gradeStr = caps.filters.has("eq") && gradeFilter ? `,${gradeFilter}` : "";
+    const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${transitionFilter},format=yuv420p`;
     const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
     const loopArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
     await ffmpeg([
@@ -154,9 +147,13 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
 }
 // ─── Dark Gradient Scene Fallback ────────────────────────────────────────────
 async function makeDarkSceneClip(outPath, durationSec, options) {
+    const caps = getFFmpegCapabilities();
+    const lavfiSrc = caps.filters.has("gradients")
+        ? `gradients=s=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:c0=0x1e1b4b:c1=0x312e81:rate=${FPS}`
+        : `color=c=0x181824:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`;
     await ffmpeg([
         "-f", "lavfi",
-        "-i", `color=c=0x0a0c12:size=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:rate=${FPS}`,
+        "-i", lavfiSrc,
         "-t", durationSec.toFixed(3),
         "-r", String(FPS),
         "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
@@ -587,6 +584,15 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
             const motion = MOTION_CYCLE[motionIdx++ % MOTION_CYCLE.length];
             const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
             if (!clipPath) {
+                const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci) % globalPool.length] : "";
+                if (fallbackClip) {
+                    try {
+                        await renderCut(fallbackClip, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
+                        renderedCuts.push(outPath);
+                        continue;
+                    }
+                    catch { }
+                }
                 await makeDarkSceneClip(outPath, durationSec, opts);
                 renderedCuts.push(outPath);
                 continue;
@@ -599,7 +605,16 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
                 if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
                     throw err;
                 }
-                console.warn(`[assembler] Cut render failed (${i}_${ci}), falling back to safe clip: ${err.message}`);
+                console.warn(`[assembler] Cut render failed (${i}_${ci}), attempting fallback clip from pool: ${err.message}`);
+                const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci + 1) % globalPool.length] : "";
+                if (fallbackClip && fallbackClip !== clipPath) {
+                    try {
+                        await renderCut(fallbackClip, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
+                        renderedCuts.push(outPath);
+                        continue;
+                    }
+                    catch { }
+                }
                 await makeDarkSceneClip(outPath, durationSec, opts);
                 renderedCuts.push(outPath);
             }
