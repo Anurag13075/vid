@@ -530,10 +530,13 @@ async function renderVideoAssembly(
     outputDir,
     async (step, total, label) => {
       if (signal?.aborted) throw new Error("Job cancelled by user");
-      const updatedSteps = renderSteps.map((s, idx) => ({ ...s, done: idx < step }));
-      if (step < renderSteps.length) updatedSteps[step].done = false;
-      const renderPct = Math.round((step / total) * 100);
-      const overallPct = 70 + Math.round((step / total) * 28);
+      const currentStepIdx = Math.floor(step);
+      const updatedSteps = renderSteps.map((s, idx) => ({ ...s, done: idx < currentStepIdx }));
+      if (currentStepIdx < renderSteps.length && updatedSteps[currentStepIdx]) {
+        updatedSteps[currentStepIdx].done = false;
+      }
+      const renderPct = Math.min(100, Math.round((step / total) * 100));
+      const overallPct = Math.min(98, 70 + Math.round((step / total) * 28));
 
       await emit(videoId, {
         stage: "rendering" as Stage,
