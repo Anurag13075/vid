@@ -46,13 +46,20 @@ function targetSections(length) {
             return { count: 16, label: "8-10 minutes", wordsPerSection: 110, totalWords: 1760 };
     }
 }
-function repairJson(raw) {
+function repairJson(raw, isArray = false) {
     let s = raw.trim();
     s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    const first = s.indexOf("{");
-    const last = s.lastIndexOf("}");
-    if (first !== -1 && last !== -1 && last > first)
-        s = s.slice(first, last + 1);
+    if (isArray) {
+        const first = s.indexOf("[");
+        const last = s.lastIndexOf("]");
+        if (first !== -1 && last !== -1 && last > first)
+            s = s.slice(first, last + 1);
+    } else {
+        const first = s.indexOf("{");
+        const last = s.lastIndexOf("}");
+        if (first !== -1 && last !== -1 && last > first)
+            s = s.slice(first, last + 1);
+    }
     s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
     s = s.replace(/\/\/[^\n]*/g, "");
     const missingCommaRe = /(\btrue|\bfalse|\bnull|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|"(?:[^"\\]|\\.)*")\s*\n(\s*"[^"]*"\s*:)/g;
@@ -93,7 +100,6 @@ async function callGroq(messages, maxTokens = 6144) {
             if (!response.ok) {
                 const responseText = await response.text();
                 console.warn(`[groq] model ${model} status ${response.status}: ${responseText}`);
-                // If model not found or invalid, try next fallback model
                 if (response.status === 404 || response.status === 400) {
                     lastError = new Error(`Groq model ${model} failed (${response.status}): ${responseText}`);
                     continue;
@@ -157,14 +163,8 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
         },
         { role: "user", content: prompt },
     ]);
-    let s = raw.trim();
-    s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    const arrStart = s.indexOf("[");
-    const arrEnd = s.lastIndexOf("]");
-    if (arrStart !== -1 && arrEnd !== -1 && arrEnd > arrStart) {
-        s = s.slice(arrStart, arrEnd + 1);
-    }
-    const parsed = JSON.parse(s);
+    const cleaned = repairJson(raw, true);
+    const parsed = JSON.parse(cleaned);
     const sections = Array.isArray(parsed) ? parsed : [];
     return sections.map((sec, i) => ({
         id: typeof sec.id === "number" ? sec.id : startId + i,
@@ -252,12 +252,8 @@ Output ONLY valid JSON array.`;
             { role: "system", content: "Output ONLY a valid JSON array of strings." },
             { role: "user", content: sourcesPrompt },
         ], 2048);
-        let clean = rawSources.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-        const sStart = clean.indexOf("[");
-        const sEnd = clean.lastIndexOf("]");
-        if (sStart !== -1 && sEnd !== -1 && sEnd > sStart) {
-            sources = JSON.parse(clean.slice(sStart, sEnd + 1));
-        }
+        const clean = repairJson(rawSources, true);
+        sources = JSON.parse(clean);
     }
     catch (err) {
         console.warn("[script] Source bibliography generation optional fallback:", err);

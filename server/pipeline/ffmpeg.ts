@@ -1,7 +1,14 @@
 import { spawn, spawnSync } from "child_process";
-import ffmpegStatic from "ffmpeg-static";
 import path from "path";
 import fs from "fs";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+let ffmpegStatic: string | null = null;
+try {
+  const mod = require("ffmpeg-static");
+  ffmpegStatic = typeof mod === "string" ? mod : mod?.default || null;
+} catch {}
 
 export interface FFmpegCapabilities {
   binaryPath: string;

@@ -351,7 +351,11 @@ async function runIncrementalPipeline(
     const section = script.sections[i];
     const clipDir = getTempDir(videoId);
 
-    const existingClips = [0, 1, 2, 3].map((ci) => path.join(clipDir, `${section.id}_${ci}.mp4`));
+    const existingClips: string[] = [];
+    for (let ci = 0; ci < 6; ci++) {
+      existingClips.push(path.join(clipDir, `${section.id}_${ci}.mp4`));
+      existingClips.push(path.join(clipDir, `${section.id}_${ci}.jpg`));
+    }
     const validExisting: string[] = [];
     for (const p of existingClips) {
       if (await fs.stat(p).then((s) => s.size > 2000).catch(() => false)) {

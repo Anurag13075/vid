@@ -1,7 +1,14 @@
 import { spawn, spawnSync } from "child_process";
-import ffmpegStatic from "ffmpeg-static";
 import path from "path";
 import fs from "fs";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+let ffmpegStatic = null;
+try {
+    const mod = require("ffmpeg-static");
+    ffmpegStatic = typeof mod === "string" ? mod : mod?.default || null;
+} catch {}
 // ─── Probe Capabilities of a Candidate Binary ────────────────────────────────
 export function probeBinaryCapabilities(binPath) {
     const result = {
