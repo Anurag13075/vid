@@ -7,9 +7,9 @@ export { getTempDir };
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
 const FPS = 30;
-const CRF = 22; // Broadcast 1080p quality
-const PRESET = "fast";
-const THREADS = 0; // auto-detect cpu cores
+const CRF = 23; // Broadcast 1080p quality
+const PRESET = "ultrafast";
+const THREADS = Math.min(os.cpus()?.length || 2, 2);
 const CUT_TARGET_SEC = 4.0;
 const CUT_MIN_SEC = 2.5;
 const CUT_MAX_SEC = 6.0;
@@ -130,9 +130,10 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
     const gradeStr = caps.filters.has("eq") && gradeFilter ? `,${gradeFilter}` : "";
     const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${transitionFilter},format=yuv420p`;
     const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
-    const loopArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
+    const inputArgs = isImage ? ["-loop", "1"] : ["-ss", "0"];
+    const cutOpts = { ...options, timeoutMs: 60000 };
     await ffmpeg([
-        ...loopArgs,
+        ...inputArgs,
         "-i", clipPath,
         "-vf", fullFilter,
         "-t", durationSec.toFixed(3),
@@ -143,7 +144,7 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
         "-g", "30", "-keyint_min", "30",
         "-video_track_timescale", "30000",
         "-an", "-y", outPath,
-    ], options);
+    ], cutOpts);
 }
 // ─── Dark Gradient Scene Fallback ────────────────────────────────────────────
 async function makeDarkSceneClip(outPath, durationSec, options) {
@@ -573,6 +574,7 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
     await onProgress(1, total, RENDER_STEPS[1].label);
     const renderedCuts = [];
     let motionIdx = 0;
+    let completedCuts = 0;
     for (let i = 0; i < sections.length; i++) {
         const cuts = cutPlan[i];
         if (!cuts || cuts.length === 0)
@@ -583,6 +585,7 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
             const { clipPath, durationSec, isSectionStart, isSectionEnd } = cuts[ci];
             const motion = MOTION_CYCLE[motionIdx++ % MOTION_CYCLE.length];
             const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
+            await onProgress(1 + (completedCuts / Math.max(totalPlannedCuts, 1)) * 0.95, total, `Rendering 1080p cut ${completedCuts + 1}/${totalPlannedCuts}`);
             if (!clipPath) {
                 const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci) % globalPool.length] : "";
                 if (fallbackClip) {
@@ -618,6 +621,7 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
                 await makeDarkSceneClip(outPath, durationSec, opts);
                 renderedCuts.push(outPath);
             }
+            completedCuts++;
         }
     }
     if (renderedCuts.length === 0) {

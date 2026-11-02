@@ -272,6 +272,7 @@ const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000;
 export interface FFmpegOptions {
   videoId?: string;
   signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 // ─── Active Process Registry for Clean Job Cancellation ──────────────────────
@@ -322,10 +323,11 @@ function runProcess(
       stderr += chunk.toString();
     });
 
+    const timeout = options?.timeoutMs || FFMPEG_TIMEOUT_MS;
     const timer = setTimeout(() => {
       try { proc.kill("SIGKILL"); } catch {}
-      reject(new Error(`${command} timed out after ${FFMPEG_TIMEOUT_MS / 1000}s`));
-    }, FFMPEG_TIMEOUT_MS);
+      reject(new Error(`${command} timed out after ${timeout / 1000}s`));
+    }, timeout);
 
     const cleanup = () => {
       clearTimeout(timer);
