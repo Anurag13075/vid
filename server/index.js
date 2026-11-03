@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
+import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
 import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
@@ -24,13 +25,47 @@ app.get("/videos/:videoId/:filename", (req, res) => {
         path.resolve("data", "videos", videoId),
     ];
     let targetFile = null;
+    let foundDir = null;
     for (const d of candidateDirs) {
         const f = path.join(d, filename);
         if (fs.existsSync(f)) {
             targetFile = f;
+            foundDir = d;
             break;
+        } else if (fs.existsSync(d)) {
+            foundDir = d;
         }
     }
+
+    // On-demand compression to ~55MB if compressed.mp4 is requested
+    if (!targetFile && filename === "compressed.mp4" && foundDir) {
+        const sourceMp4 = path.join(foundDir, "final.mp4");
+        if (fs.existsSync(sourceMp4)) {
+            const compOut = path.join(foundDir, "compressed.mp4");
+            const partComp = compOut + ".part.mp4";
+            try {
+                const ffmpegCmd = process.env.FFMPEG_PATH || "ffmpeg";
+                spawnSync(ffmpegCmd, [
+                    "-i", sourceMp4,
+                    "-c:v", "libx264", "-crf", "26",
+                    "-b:v", "650k", "-maxrate", "950k", "-bufsize", "1500k",
+                    "-preset", "ultrafast",
+                    "-profile:v", "high", "-level", "4.1",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
+                    "-movflags", "+faststart",
+                    "-y", partComp,
+                ], { timeout: 180000 });
+                if (fs.existsSync(partComp) && fs.statSync(partComp).size > 10000) {
+                    fs.renameSync(partComp, compOut);
+                    targetFile = compOut;
+                }
+            } catch (err) {
+                console.warn("[compress] On-demand compression failed:", err);
+            }
+        }
+    }
+
     if (!targetFile) {
         return res.status(404).json({ error: "Video file not found or still rendering" });
     }

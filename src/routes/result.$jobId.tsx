@@ -1265,7 +1265,16 @@ export function ResultPage() {
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 transition-all font-medium text-white shadow-lg shadow-purple-600/30 text-[13px] active:scale-95"
             >
               <Download className="h-4 w-4" />
-              Download MP4 (1080p)
+              Download MP4 (1080p · ~55MB)
+            </a>
+
+            <a
+              href={`/videos/${jobId}/compressed.mp4`}
+              download={`${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}_50MB.mp4`}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 transition-all font-medium text-emerald-300 hover:text-emerald-200 text-[13px] active:scale-95"
+            >
+              <Download className="h-4 w-4" />
+              Download 50MB Edition
             </a>
 
             <button
@@ -1383,32 +1392,38 @@ export function ResultPage() {
           {/* Scene Breakdown */}
           <div className="space-y-3">
             <h2 className="text-lg font-semibold text-white">Documentary Chapters ({scriptData.sections.length} Sections)</h2>
-            {scriptData.sections.map((sec: any, idx: number) => (
-              <div
-                key={sec.id || idx}
-                onClick={() => {
-                  if (videoRef.current) {
-                    videoRef.current.currentTime = sec.start;
-                    videoRef.current.play().catch(() => {});
-                  }
-                  showHud(`Chapter ${idx + 1}`, `Jumped to ${sec.title}`);
-                }}
-                className="p-4 rounded-xl bg-[#12121b] border border-white/5 hover:border-purple-500/40 transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-              >
-                <div className="flex items-start gap-3">
-                  <span className="text-[11px] font-mono px-2 py-1 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 shrink-0">
-                    {Math.floor(sec.start / 60)}:{String(sec.start % 60).padStart(2, "0")}
-                  </span>
-                  <div>
-                    <h3 className="text-[14px] font-semibold text-white">{sec.title}</h3>
-                    <p className="text-[12px] text-zinc-400 line-clamp-1">"{sec.narration}"</p>
+            {scriptData.sections.map((sec: any, idx: number) => {
+              const totalSecs = scriptData.sections.length || 1;
+              const approxDur = Math.round((duration || 600) / totalSecs);
+              const secStart = Number.isFinite(sec.start) ? sec.start : idx * approxDur;
+              const secDur = Number.isFinite(sec.duration) ? sec.duration : approxDur;
+              return (
+                <div
+                  key={sec.id || idx}
+                  onClick={() => {
+                    if (videoRef.current && Number.isFinite(secStart)) {
+                      videoRef.current.currentTime = secStart;
+                      videoRef.current.play().catch(() => {});
+                    }
+                    showHud(`Chapter ${idx + 1}`, `Jumped to ${sec.title || `Scene ${idx + 1}`}`);
+                  }}
+                  className="p-4 rounded-xl bg-[#12121b] border border-white/5 hover:border-purple-500/40 transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="flex items-start gap-3">
+                    <span className="text-[11px] font-mono px-2 py-1 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 shrink-0">
+                      {Math.floor(secStart / 60)}:{String(secStart % 60).padStart(2, "0")}
+                    </span>
+                    <div>
+                      <h3 className="text-[14px] font-semibold text-white">{sec.title || `Scene ${idx + 1}`}</h3>
+                      <p className="text-[12px] text-zinc-400 line-clamp-1">"{sec.narration}"</p>
+                    </div>
+                  </div>
+                  <div className="text-[11px] font-mono text-zinc-500 shrink-0">
+                    {secDur}s · Click to seek
                   </div>
                 </div>
-                <div className="text-[11px] font-mono text-zinc-500 shrink-0">
-                  {sec.duration}s · Click to seek
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </main>

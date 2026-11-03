@@ -31,6 +31,7 @@ const FONT_CANDIDATES = [
   "/usr/share/fonts/TTF/DejaVuSans.ttf",
 ];
 
+
 async function resolveFont(): Promise<string> {
   for (const f of FONT_CANDIDATES) {
     try {
@@ -182,7 +183,8 @@ async function renderCut(
     "-t", durationSec.toFixed(3),
     "-r", String(FPS),
     "-threads", String(THREADS),
-    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-c:v", "libx264", "-crf", "24", "-preset", PRESET,
+    "-b:v", "1200k", "-maxrate", "1800k", "-bufsize", "3000k",
     "-pix_fmt", "yuv420p",
     "-g", "30", "-keyint_min", "30",
     "-video_track_timescale", "30000",
@@ -493,10 +495,20 @@ async function finalProductionMix(
   const partOutput = outputPath + ".part.mp4";
   await fs.unlink(partOutput).catch(() => {});
 
+  // Dynamic bitrate calculation targeting ~55 MB download package
+  const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
+  const safeDur = Math.max(voDur, 60);
+  const totalBitrateKbps = Math.floor(450560 / safeDur);
+  const targetVideoKbps = Math.max(380, Math.min(1400, totalBitrateKbps - 96));
+  const videoBitrateStr = `${targetVideoKbps}k`;
+  const maxRateStr = `${Math.round(targetVideoKbps * 1.35)}k`;
+  const bufSizeStr = `${Math.round(targetVideoKbps * 2.0)}k`;
+  const targetCrf = targetVideoKbps < 600 ? "27" : "25";
+  console.log(`[assembler] Dynamic 55MB encode profile: dur=${safeDur.toFixed(1)}s videoBitrate=${videoBitrateStr} crf=${targetCrf}`);
+
   // ── Tier 1: Full broadcast mix (ASS subtitles + clean balanced audio mastering) ──
   try {
     if (hasBgm && bgmPath) {
-      const voDur = await getExactDuration(voiceoverPath);
       const fadeOutStart = Math.max(voDur - 2.5, 0);
 
       await ffmpeg([
@@ -510,10 +522,12 @@ async function finalProductionMix(
         ].join(";"),
         "-map", "0:v", "-map", "[audio]",
         "-vf", videoFilterStr,
-        "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+        "-c:v", "libx264", "-crf", targetCrf,
+        "-b:v", videoBitrateStr, "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
+        "-preset", PRESET,
         "-profile:v", "high", "-level", "4.1",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
         "-movflags", "+faststart",
         "-shortest",
         "-y", partOutput,
@@ -525,10 +539,12 @@ async function finalProductionMix(
         "-filter_complex", `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[audio]`,
         "-map", "0:v", "-map", "[audio]",
         "-vf", videoFilterStr,
-        "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+        "-c:v", "libx264", "-crf", targetCrf,
+        "-b:v", videoBitrateStr, "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
+        "-preset", PRESET,
         "-profile:v", "high", "-level", "4.1",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
         "-movflags", "+faststart",
         "-shortest",
         "-y", partOutput,
@@ -554,10 +570,12 @@ async function finalProductionMix(
       "-i", voiceoverPath,
       "-map", "0:v", "-map", "1:a",
       "-vf", videoFilterStr,
-      "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+      "-c:v", "libx264", "-crf", targetCrf,
+      "-b:v", videoBitrateStr, "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
+      "-preset", PRESET,
       "-profile:v", "high", "-level", "4.1",
       "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+      "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
       "-movflags", "+faststart",
       "-shortest",
       "-y", partOutput,
