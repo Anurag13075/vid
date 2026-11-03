@@ -91,25 +91,18 @@ async function runAudit() {
   // ── TEST 4: Cut Slicer Algorithm & Timing Precision ─────────────────────────
   console.log("\n[4/7] Testing Video Cut Slicer & Synchronization...");
   try {
-    function sliceCuts(audioDuration) {
-      const CUT_TARGET_SEC = 4.0;
-      const CUT_MIN_SEC = 2.5;
-      const CUT_MAX_SEC = 6.0;
+    function sliceCuts(audioDuration, numClips = 2) {
+      const CUT_TARGET_SEC = 10.0;
+      const CUT_MIN_SEC = 6.0;
+      const CUT_MAX_SEC = 16.0;
       if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
-      const cuts = [];
-      let remaining = audioDuration;
-      while (remaining > 0) {
-        if (remaining <= CUT_MAX_SEC) { cuts.push(remaining); break; }
-        const wouldLeave = remaining - CUT_TARGET_SEC;
-        if (wouldLeave > 0 && wouldLeave < CUT_MIN_SEC) {
-          const half = remaining / 2;
-          cuts.push(half, half);
-          break;
-        }
-        cuts.push(CUT_TARGET_SEC);
-        remaining -= CUT_TARGET_SEC;
-      }
-      return cuts;
+      const maxCutsForSection = Math.max(2, Math.min(Math.round(audioDuration / CUT_MIN_SEC), Math.max(numClips * 2, 4)));
+      const idealCount = Math.min(
+        Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)),
+        maxCutsForSection
+      );
+      const cutDur = audioDuration / idealCount;
+      return new Array(idealCount).fill(cutDur);
     }
 
     const testDurations = [3.0, 7.5, 12.0, 47.8, 125.4];

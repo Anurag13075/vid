@@ -161,7 +161,7 @@ async function runPipeline(videoId, signal) {
                 clips: [...clips],
             });
             try {
-                const foundClips = await findMultipleFootage(section, 6, videoId, usedIds, title);
+                const foundClips = await findMultipleFootage(section, 2, videoId, usedIds, title);
                 const downloadedPaths = [];
                 if (foundClips.length > 0) {
                     for (let ci = 0; ci < foundClips.length; ci++) {
@@ -328,7 +328,7 @@ async function runIncrementalPipeline(videoId, options, signal) {
                 script,
                 clips,
             });
-            const found = await findMultipleFootage(section, 6, videoId, usedIds, video.title);
+            const found = await findMultipleFootage(section, 2, videoId, usedIds, video.title);
             const dlPaths = [];
             for (let ci = 0; ci < found.length; ci++) {
                 try {
@@ -490,4 +490,10 @@ async function renderVideoAssembly(videoId, title, sections, audioPaths, footage
         thumbnailUrl,
     });
     console.log(`✅ Video ${videoId} complete (${actualDuration}s): ${videoPath}`);
+    // Clean up temporary workspace directory for this job to free disk space
+    try {
+        const jobTmp = getTempDir(videoId);
+        await fs.rm(jobTmp, { recursive: true, force: true }).catch(() => { });
+    }
+    catch { }
 }

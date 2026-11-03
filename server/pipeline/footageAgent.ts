@@ -7,7 +7,7 @@ import { createWriteStream } from "fs";
 import type { ScriptSection, Clip } from "./types.js";
 import { getTempDir } from "./tempDir.js";
 
-const CLIPS_PER_SECTION = 6;
+const CLIPS_PER_SECTION = 2;
 
 export function createClipTracker(): Set<string> {
   return new Set<string>();
@@ -271,7 +271,7 @@ export async function findMultipleFootage(
   title: string
 ): Promise<Clip[]> {
   const clips: Clip[] = [];
-  const clipsNeeded = limit || CLIPS_PER_SECTION;
+  const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 2);
 
   const cleanKeywords = section.visual_keywords
     .map(sanitizeKeyword)

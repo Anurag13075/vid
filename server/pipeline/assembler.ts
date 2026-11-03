@@ -17,9 +17,9 @@ const CRF = 23; // Broadcast 1080p quality
 const PRESET = "ultrafast";
 const THREADS = Math.min(os.cpus()?.length || 2, 2);
 
-const CUT_TARGET_SEC = 4.0;
-const CUT_MIN_SEC = 2.5;
-const CUT_MAX_SEC = 6.0;
+const CUT_TARGET_SEC = 10.0;
+const CUT_MIN_SEC = 6.0;
+const CUT_MAX_SEC = 16.0;
 
 const FONT_CANDIDATES = [
   "C:/Windows/Fonts/arialbd.ttf",
@@ -172,7 +172,7 @@ async function renderCut(
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${transitionFilter},format=yuv420p`;
 
   const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
-  const inputArgs = isImage ? ["-loop", "1"] : ["-ss", "0"];
+  const inputArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
   const cutOpts = { ...options, timeoutMs: 60000 };
 
   await ffmpeg([
@@ -214,26 +214,23 @@ async function makeDarkSceneClip(
   ], options);
 }
 
-// ─── Cut Slicer (Ensures Cuts Sum Exactly to Audio Track Duration) ───────────
-function sliceCuts(audioDuration: number): number[] {
+// ─── Cut Slicer (Cinematic Documentary Pacing – 10-16s per shot) ─────────────
+// Produces even-length cuts that sum exactly to audioDuration.
+// numClips is the number of distinct visual clips available for this section;
+// it caps total cuts so we don't redundantly re-encode the same clip.
+function sliceCuts(audioDuration: number, numClips = 2): number[] {
   if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
-  const cuts: number[] = [];
-  let remaining = audioDuration;
-  while (remaining > 0) {
-    if (remaining <= CUT_MAX_SEC) {
-      cuts.push(remaining);
-      break;
-    }
-    const wouldLeave = remaining - CUT_TARGET_SEC;
-    if (wouldLeave > 0 && wouldLeave < CUT_MIN_SEC) {
-      const half = remaining / 2;
-      cuts.push(half, half);
-      break;
-    }
-    cuts.push(CUT_TARGET_SEC);
-    remaining -= CUT_TARGET_SEC;
-  }
-  return cuts;
+  // Cap cuts: at most numClips*2 cuts (so each clip used at most twice), min 2
+  const maxCutsForSection = Math.max(2, Math.min(
+    Math.round(audioDuration / CUT_MIN_SEC),
+    Math.max(numClips * 2, 4)
+  ));
+  const idealCount = Math.min(
+    Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)),
+    maxCutsForSection
+  );
+  const cutDur = audioDuration / idealCount;
+  return new Array(idealCount).fill(cutDur);
 }
 
 // ─── ASS Subtitles & Karaoke Generator ───────────────────────────────────────
@@ -396,6 +393,12 @@ async function joinAllCuts(
   }
 
   await fs.unlink(listPath).catch(() => {});
+
+  // Immediately free disk space by removing intermediate cut files
+  console.log(`[assembler] Cleaning up ${clipPaths.length} intermediate cut files to free disk space`);
+  for (const p of clipPaths) {
+    fs.unlink(p).catch(() => {});
+  }
 }
 
 // ─── Merge Voiceover Audio ──────────────────────────────────────────────────
@@ -683,8 +686,8 @@ export async function assemble(
     });
     runningTime += dur;
 
-    const cuts = sliceCuts(dur);
     const sectionClips = getSectionClips(i);
+    const cuts = sliceCuts(dur, sectionClips.length);
 
     cutPlan.push(
       cuts.map((d, ci) => ({
@@ -725,20 +728,43 @@ export async function assemble(
       );
 
       if (!clipPath) {
+        console.warn(`[assembler] Section ${i} cut ${ci}: no clip assigned, using fallback`);
         const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci) % globalPool.length] : "";
         if (fallbackClip) {
           try {
             await renderCut(fallbackClip, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
             renderedCuts.push(outPath);
             continue;
-          } catch {}
+          } catch (e: any) {
+            console.warn(`[assembler] Fallback clip render also failed: ${e.message}`);
+          }
         }
         await makeDarkSceneClip(outPath, durationSec, opts);
         renderedCuts.push(outPath);
         continue;
       }
 
+      // Verify clip file actually exists and has data before rendering
+      const clipStat = await fs.stat(clipPath).catch(() => null);
+      if (!clipStat || clipStat.size < 2000) {
+        console.warn(`[assembler] Section ${i} cut ${ci}: clip file missing or too small (${clipStat?.size ?? 0} bytes): ${clipPath}`);
+        const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci) % globalPool.length] : "";
+        if (fallbackClip && fallbackClip !== clipPath) {
+          try {
+            await renderCut(fallbackClip, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
+            renderedCuts.push(outPath);
+            completedCuts++;
+            continue;
+          } catch {}
+        }
+        await makeDarkSceneClip(outPath, durationSec, opts);
+        renderedCuts.push(outPath);
+        completedCuts++;
+        continue;
+      }
+
       try {
+        console.log(`[assembler] Rendering cut ${completedCuts + 1}/${totalPlannedCuts}: section=${i} clip=${path.basename(clipPath)} dur=${durationSec.toFixed(1)}s motion=${motion}`);
         await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
         renderedCuts.push(outPath);
       } catch (err: any) {
