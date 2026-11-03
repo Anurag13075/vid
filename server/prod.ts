@@ -22,7 +22,41 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "10mb" }));
 
-// Serve generated video files
+// Dedicated video serving with Range support (prevents 404 falling back to index.html)
+app.get("/videos/:videoId/:filename", (req, res) => {
+  const { videoId, filename } = req.params;
+  const candidateDirs = [
+    path.join(__dirname, "../data/videos", videoId),
+    path.join(process.cwd(), "data/videos", videoId),
+    path.resolve("data", "videos", videoId),
+  ];
+
+  let targetFile: string | null = null;
+  for (const d of candidateDirs) {
+    const f = path.join(d, filename);
+    if (fs.existsSync(f)) {
+      targetFile = f;
+      break;
+    }
+  }
+
+  if (!targetFile) {
+    return res.status(404).json({ error: "Video file not found or still rendering" });
+  }
+
+  const ext = path.extname(filename).toLowerCase();
+  const contentType = ext === ".mp4" ? "video/mp4" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "application/octet-stream";
+
+  res.sendFile(path.resolve(targetFile), {
+    acceptRanges: true,
+    headers: {
+      "Content-Type": contentType,
+      "Accept-Ranges": "bytes",
+    },
+  });
+});
+
+// Serve other static assets in data/videos
 app.use("/videos", express.static(path.join(__dirname, "../data/videos")));
 
 // REST API

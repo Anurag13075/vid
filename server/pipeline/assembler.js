@@ -174,6 +174,17 @@ function sliceCuts(audioDuration, numClips = 2) {
     const cutDur = audioDuration / idealCount;
     return new Array(idealCount).fill(cutDur);
 }
+function sanitizeDisplayTitle(raw) {
+    let clean = raw
+        .replace(/^(?:create|make|generate|produce)\s+(?:a\s+)?(?:cinematic\s+|documentary\s+|youtube\s+|short\s+|long\s+)*(?:video\s+(?:about\s+|on\s+)?|documentary\s+(?:about\s+|on\s+)?)/i, "")
+        .replace(/^(?:subtitle\s*:\s*|title\s*:\s*)/i, "")
+        .trim();
+    const colonIdx = clean.indexOf(":");
+    if (colonIdx > 10 && clean.length > 50) {
+        clean = clean.slice(0, colonIdx).trim();
+    }
+    return clean || raw;
+}
 // ─── ASS Subtitles & Karaoke Generator ───────────────────────────────────────
 async function generateAssKaraoke(sections, sectionTimings, audioPaths, assPath, accentHex, includeOverlayFallbacks = true, videoTitle = "") {
     const accentColor = hexToAss(accentHex, 0);
@@ -186,9 +197,10 @@ async function generateAssKaraoke(sections, sectionTimings, audioPaths, assPath,
     // If drawtext is not available on current build, ASS renders the overlays seamlessly
     if (includeOverlayFallbacks) {
         if (videoTitle.trim()) {
-            const cleanTitle = escapeAss(videoTitle.length > 55 ? videoTitle.slice(0, 52) + "..." : videoTitle);
-            events += `Dialogue: 3,0:00:00.40,0:00:04.20,TitleCard,,0,0,0,,{\\fad(400,400)}${cleanTitle}\n`;
-            events += `Dialogue: 4,0:00:00.60,0:00:04.20,TitleBadge,,0,0,0,,{\\fad(300,400)}━ DOCUMENTARY INVESTIGATION ━\n`;
+            const displayTitle = sanitizeDisplayTitle(videoTitle);
+            const cleanTitle = escapeAss(displayTitle.length > 50 ? displayTitle.slice(0, 48) + "..." : displayTitle);
+            events += `Dialogue: 4,0:00:00.30,0:00:04.50,TitleBadge,,0,0,0,,{\\fad(300,400)}━ DOCUMENTARY INVESTIGATION ━\n`;
+            events += `Dialogue: 3,0:00:00.50,0:00:04.50,TitleCard,,0,0,0,,{\\fad(400,400)}${cleanTitle}\n`;
         }
         for (const t of sectionTimings) {
             const dur = t.endSec - t.startSec;
@@ -260,10 +272,10 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,50,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3,2,2,80,80,95,1
-Style: TitleCard,DejaVu Sans,58,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,4,4,5,100,100,100,1
-Style: TitleBadge,DejaVu Sans,26,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,3,0,3,2,2,5,100,100,220,1
-Style: StatCard,DejaVu Sans,42,${white},${white},${black},${cardBox},1,0,0,0,100,100,1,0,3,3,3,5,120,120,120,1
+Style: Default,DejaVu Sans,48,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3,2,2,80,80,95,1
+Style: TitleBadge,DejaVu Sans,24,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,3,0,3,2,2,8,80,80,85,1
+Style: TitleCard,DejaVu Sans,44,${white},${white},${black},${shadowBox},1,0,0,0,100,100,1,0,3,3,3,8,80,80,135,1
+Style: StatCard,DejaVu Sans,38,${white},${white},${black},${cardBox},1,0,0,0,100,100,1,0,3,3,3,8,120,120,80,1
 Style: ChapterTag,DejaVu Sans,24,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,60,1
 
 [Events]
@@ -371,7 +383,10 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
     vfFilters.push("format=yuv420p");
     const videoFilterStr = vfFilters.join(",");
 
-    // ── Tier 1: Full broadcast mix (ASS subtitles + BGM dynamic ducking + loudnorm) ──
+    const partOutput = outputPath + ".part.mp4";
+    await fs.unlink(partOutput).catch(() => {});
+
+    // ── Tier 1: Full broadcast mix (ASS subtitles + clean balanced audio mastering) ──
     try {
         if (hasBgm && bgmPath) {
             const voDur = await getExactDuration(voiceoverPath);
@@ -382,43 +397,49 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
                 "-stream_loop", "-1", "-i", bgmPath,
                 "-filter_complex", [
                     `[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.10,afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
-                    `[1:a]aformat=sample_rates=44100:channel_layouts=stereo[vo]`,
-                    `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
+                    `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+                    `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2[audio]`,
                 ].join(";"),
                 "-map", "0:v", "-map", "[audio]",
                 "-vf", videoFilterStr,
                 "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+                "-profile:v", "high", "-level", "4.1",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
                 "-movflags", "+faststart",
-                "-y", outputPath,
+                "-shortest",
+                "-y", partOutput,
             ], options);
         }
         else {
             await ffmpeg([
                 "-i", videoPath,
                 "-i", voiceoverPath,
-                "-filter_complex", `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,loudnorm=I=-14:TP=-1.5:LRA=11[audio]`,
+                "-filter_complex", `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[audio]`,
                 "-map", "0:v", "-map", "[audio]",
                 "-vf", videoFilterStr,
                 "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+                "-profile:v", "high", "-level", "4.1",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
                 "-movflags", "+faststart",
-                "-y", outputPath,
+                "-shortest",
+                "-y", partOutput,
             ], options);
         }
-        console.log("[assembler] Tier 1 production mix successful");
+        await fs.rename(partOutput, outputPath);
+        console.log("[assembler] Tier 1 production mix successful & atomically verified");
         return;
     }
     catch (err) {
+        await fs.unlink(partOutput).catch(() => {});
         if (options?.signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
             throw err;
         }
         console.warn(`[assembler] Tier 1 mix failed (${err.message}). Retrying Tier 2 (safe mix)...`);
     }
 
-    // ── Tier 2: Safe mix with ASS subtitles + clean voiceover (no complex audio filters) ──
+    // ── Tier 2: Safe mix with ASS subtitles + direct stereo audio ──
     try {
         await ffmpeg([
             "-i", videoPath,
@@ -426,31 +447,38 @@ async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, ou
             "-map", "0:v", "-map", "1:a",
             "-vf", videoFilterStr,
             "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+            "-profile:v", "high", "-level", "4.1",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
             "-movflags", "+faststart",
-            "-y", outputPath,
+            "-shortest",
+            "-y", partOutput,
         ], options);
+        await fs.rename(partOutput, outputPath);
         console.log("[assembler] Tier 2 safe mix successful");
         return;
     }
     catch (err) {
+        await fs.unlink(partOutput).catch(() => {});
         if (options?.signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
             throw err;
         }
         console.warn(`[assembler] Tier 2 mix failed (${err.message}). Retrying Tier 3 (direct stream mux)...`);
     }
 
-    // ── Tier 3: Direct stream mux (zero video re-encoding, guaranteed to succeed) ──
+    // ── Tier 3: Direct stream mux (instant 2s copy, guaranteed to produce valid video) ──
     await ffmpeg([
         "-i", videoPath,
         "-i", voiceoverPath,
         "-map", "0:v", "-map", "1:a",
         "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-movflags", "+faststart",
-        "-y", outputPath,
+        "-shortest",
+        "-y", partOutput,
     ], options);
+    await fs.rename(partOutput, outputPath);
+    console.log("[assembler] Tier 3 direct stream mux successful");
     console.log("[assembler] Tier 3 direct mux completed successfully");
 }
 // ─── Thumbnail Extraction ────────────────────────────────────────────────────

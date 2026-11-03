@@ -974,8 +974,9 @@ export function ResultPage() {
           )}
         </div>
 
-        {/* ─── Real-Time Split Parts Studio Bar (Always Visibly Accessible!) ─── */}
-        <div className="mb-4 p-4 rounded-2xl bg-[#12121b]/90 border border-purple-500/30 shadow-lg">
+        {/* ─── Real-Time Split Parts Studio Bar (Only when user explicitly triggered Split or in demo) ─── */}
+        {(splitTriggered || isDemo) && (
+          <div className="mb-4 p-4 rounded-2xl bg-[#12121b]/90 border border-purple-500/30 shadow-lg">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-purple-500 animate-ping" />
@@ -1084,6 +1085,7 @@ export function ResultPage() {
             })}
           </div>
         </div>
+        )}
 
         {/* ─── DUAL SPLIT PLAYER VIEW (If User Dictated "Dual View" or "Split Video") ─── */}
         {isDualSplitView && parts.length >= 2 && (
@@ -1167,6 +1169,7 @@ export function ResultPage() {
               src={videoUrl}
               controls
               playsInline
+              preload="auto"
               poster={job.thumbnailUrl || (isDemo ? "/videos/demo/thumb.jpg" : undefined)}
               className="w-full h-full object-cover transition-all duration-500 ease-out"
               style={{
