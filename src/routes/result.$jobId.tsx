@@ -1260,21 +1260,21 @@ export function ResultPage() {
         <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-2.5">
             <a
-              href={videoUrl}
+              href={isDemo ? "/The-Complete-History-SnapYT.App.mp4" : `/api/videos/${jobId}/download`}
               download={`${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}.mp4`}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 transition-all font-medium text-white shadow-lg shadow-purple-600/30 text-[13px] active:scale-95"
             >
               <Download className="h-4 w-4" />
-              Download MP4 (1080p · ~55MB)
+              Download MP4 (1080p · 50–60MB)
             </a>
 
             <a
-              href={`/videos/${jobId}/compressed.mp4`}
-              download={`${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}_50MB.mp4`}
+              href={`${videoUrl}?download=1`}
+              download={`${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}.mp4`}
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 transition-all font-medium text-emerald-300 hover:text-emerald-200 text-[13px] active:scale-95"
             >
               <Download className="h-4 w-4" />
-              Download 50MB Edition
+              Direct Mirror Download
             </a>
 
             <button

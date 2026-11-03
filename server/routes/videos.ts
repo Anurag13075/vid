@@ -1,5 +1,8 @@
 import { Router, type Request, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
 import { createVideo, getVideo, listVideos, updateVideo } from "../db.js";
 import { startPipeline, startIncrementalReRender, cancelVideoJob } from "../pipeline/orchestrator.js";
 import { VOICES } from "../pipeline/voiceover.js";
@@ -244,6 +247,39 @@ router.get("/:id", async (req: Request, res: Response) => {
     res.json(normalized);
   } catch (err) {
     res.status(500).json({ error: "Failed to get video" });
+  }
+});
+
+// GET /api/videos/:id/download — Native high-speed attachment download
+router.get("/:id/download", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const candidateDirs = [
+      path.join(process.cwd(), "data", "videos", id),
+      path.resolve("data", "videos", id),
+    ];
+
+    let targetFile: string | null = null;
+    for (const d of candidateDirs) {
+      const f = path.join(d, "final.mp4");
+      if (fs.existsSync(f)) {
+        targetFile = f;
+        break;
+      }
+    }
+
+    if (!targetFile) {
+      return res.status(404).json({ error: "Video file not found or still rendering" });
+    }
+
+    const video = await getVideo(id);
+    const rawTitle = video?.title || "VidRush-Video";
+    const cleanTitle = rawTitle.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
+    const downloadName = `${cleanTitle}_1080p.mp4`;
+
+    res.download(path.resolve(targetFile), downloadName);
+  } catch (err: any) {
+    res.status(500).json({ error: "Download failed: " + err.message });
   }
 });
 
