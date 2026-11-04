@@ -67,29 +67,43 @@ function cleanNarrationText(text: string): string {
 // ─── Microsoft Edge Neural TTS ──────────────────────────────────────────────
 async function generateEdgeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
   const edgeVoice = EDGE_VOICE_MAP[voiceId] || (MALE_VOICES.has(voiceId) ? "en-US-ChristopherNeural" : "en-US-AriaNeural");
-  
-  return new Promise<void>((resolve, reject) => {
-    const proc = spawn("edge-tts", [
-      "--voice", edgeVoice,
-      "--text", text,
-      "--write-media", outputPath
-    ], { stdio: ["ignore", "pipe", "pipe"] });
+  const tempTextFile = outputPath + ".txt";
+  await fs.writeFile(tempTextFile, text, "utf8");
 
-    let stderr = "";
-    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+  const candidates: { cmd: string; args: string[] }[] = [
+    { cmd: "edge-tts", args: ["--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
+    { cmd: "python3", args: ["-m", "edge_tts", "--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
+    { cmd: "/usr/local/bin/edge-tts", args: ["--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
+    { cmd: "/usr/bin/edge-tts", args: ["--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
+    { cmd: "python", args: ["-m", "edge_tts", "--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
+  ];
 
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`edge-tts exited with code ${code}: ${stderr}`));
+  let lastError: Error | null = null;
+  for (const c of candidates) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(c.cmd, c.args, { stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        proc.stderr.on("data", (d) => { stderr += d.toString(); });
+        proc.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`${c.cmd} exited with code ${code}: ${stderr}`));
+        });
+        proc.on("error", (err) => reject(err));
+      });
+
+      const stat = await fs.stat(outputPath).catch(() => null);
+      if (stat && stat.size > 500) {
+        await fs.unlink(tempTextFile).catch(() => {});
+        return; // Success!
       }
-    });
+    } catch (err: any) {
+      lastError = err;
+    }
+  }
 
-    proc.on("error", (err) => {
-      reject(err);
-    });
-  });
+  await fs.unlink(tempTextFile).catch(() => {});
+  throw lastError || new Error("All Edge TTS candidates failed");
 }
 
 // ─── ElevenLabs TTS Generation ──────────────────────────────────────────────
@@ -144,18 +158,21 @@ async function generateElevenLabsTTS(
   }
 }
 
-// ─── Free Spoken TTS Fallback with Male/Female Formant Shifting ─────────────
+// ─── Clean Spoken TTS Fallback (Natural 1.0x Human Pacing) ─────────────────
 async function generateFreeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
-  const words = text.split(/\s+/).filter(Boolean);
+  // Split on sentence boundaries to ensure natural cadence and breathing pauses
+  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
   const chunks: string[] = [];
   let cur = "";
 
-  for (const w of words) {
-    if ((cur + " " + w).length <= 160) {
-      cur += (cur ? " " : "") + w;
+  for (const s of sentences) {
+    const trimmed = s.trim();
+    if (!trimmed) continue;
+    if ((cur + " " + trimmed).length <= 150) {
+      cur += (cur ? " " : "") + trimmed;
     } else {
       if (cur) chunks.push(cur);
-      cur = w;
+      cur = trimmed;
     }
   }
   if (cur) chunks.push(cur);
@@ -177,15 +194,9 @@ async function generateFreeTTS(text: string, voiceId: string, outputPath: string
   const tmpRaw = outputPath + ".raw.mp3";
   await fs.writeFile(tmpRaw, rawAudio);
 
-  // If a male voice was selected, apply deep resonant male formant filter
-  const isMale = MALE_VOICES.has(voiceId);
-  const audioFilter = isMale
-    ? "asetrate=44100*0.80,aresample=44100,atempo=1.25,equalizer=f=120:width_type=o:width=1.5:g=5"
-    : "aformat=sample_rates=44100:channel_layouts=stereo";
-
+  // Normalize directly to standard 44.1kHz stereo MP3 at natural 1.0x human speaking speed
   await ffmpeg([
     "-i", tmpRaw,
-    "-af", audioFilter,
     "-ar", "44100",
     "-ac", "2",
     "-c:a", "libmp3lame",

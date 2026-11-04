@@ -21,6 +21,8 @@ zerops:
         - sudo apk update
         - sudo apk add --no-cache ffmpeg ttf-dejavu py3-pip python3
         - sudo pip install --no-cache-dir edge-tts --break-system-packages
+        - sudo ln -sf $(which edge-tts 2>/dev/null || echo /usr/local/bin/edge-tts) /usr/bin/edge-tts 2>/dev/null || true
+        - sudo chmod -R a+rx /usr/local/bin /usr/bin 2>/dev/null || true
       ports:
         - port: 5000
           httpSupport: true
