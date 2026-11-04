@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
+import { spawn } from "child_process";
 import type { ScriptSection } from "./types.js";
 import { ffmpeg, ffprobe } from "./ffmpeg.js";
 import { getTempDir } from "./tempDir.js";
@@ -23,6 +24,30 @@ export const VOICES = [
   { id: "newscast_female",    label: "Natalie · Professional Female",tags: ["Female", "Professional", "American"], elevenVoiceId: "ThT5KcBeYPX3keUQqHPh" },
 ];
 
+const EDGE_VOICE_MAP: Record<string, string> = {
+  presenter_female: "en-US-AriaNeural",
+  audiobook_female_1: "en-US-AvaNeural",
+  presenter_male: "en-US-BrianNeural",
+  audiobook_male_1: "en-GB-RyanNeural",
+  newscast_male: "en-US-GuyNeural",
+  casual_guy: "en-US-AndrewNeural",
+  wise_woman: "en-GB-SoniaNeural",
+  deep_space_master: "en-US-ChristopherNeural",
+  calm_woman: "en-US-JennyNeural",
+  audiobook_female_2: "en-US-MichelleNeural",
+  audiobook_male_2: "en-US-EricNeural",
+  newscast_female: "en-US-AnaNeural",
+};
+
+const MALE_VOICES = new Set([
+  "presenter_male",
+  "audiobook_male_1",
+  "newscast_male",
+  "casual_guy",
+  "deep_space_master",
+  "audiobook_male_2",
+]);
+
 const DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"; // George (reliable narrator)
 
 function resolveElevenVoice(voiceId: string): string {
@@ -37,6 +62,34 @@ function cleanNarrationText(text: string): string {
     .replace(/[#_~`]/g, "") // remove markdown symbols
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// ─── Microsoft Edge Neural TTS ──────────────────────────────────────────────
+async function generateEdgeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
+  const edgeVoice = EDGE_VOICE_MAP[voiceId] || (MALE_VOICES.has(voiceId) ? "en-US-ChristopherNeural" : "en-US-AriaNeural");
+  
+  return new Promise<void>((resolve, reject) => {
+    const proc = spawn("edge-tts", [
+      "--voice", edgeVoice,
+      "--text", text,
+      "--write-media", outputPath
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`edge-tts exited with code ${code}: ${stderr}`));
+      }
+    });
+
+    proc.on("error", (err) => {
+      reject(err);
+    });
+  });
 }
 
 // ─── ElevenLabs TTS Generation ──────────────────────────────────────────────
@@ -91,8 +144,8 @@ async function generateElevenLabsTTS(
   }
 }
 
-// ─── Free High-Quality Spoken TTS Fallback (Zero API Key Required) ───────────
-async function generateFreeTTS(text: string, outputPath: string): Promise<void> {
+// ─── Free Spoken TTS Fallback with Male/Female Formant Shifting ─────────────
+async function generateFreeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
   const words = text.split(/\s+/).filter(Boolean);
   const chunks: string[] = [];
   let cur = "";
@@ -124,9 +177,15 @@ async function generateFreeTTS(text: string, outputPath: string): Promise<void> 
   const tmpRaw = outputPath + ".raw.mp3";
   await fs.writeFile(tmpRaw, rawAudio);
 
-  // Normalize audio to standard 44.1kHz stereo MP3
+  // If a male voice was selected, apply deep resonant male formant filter
+  const isMale = MALE_VOICES.has(voiceId);
+  const audioFilter = isMale
+    ? "asetrate=44100*0.80,aresample=44100,atempo=1.25,equalizer=f=120:width_type=o:width=1.5:g=5"
+    : "aformat=sample_rates=44100:channel_layouts=stereo";
+
   await ffmpeg([
     "-i", tmpRaw,
+    "-af", audioFilter,
     "-ar", "44100",
     "-ac", "2",
     "-c:a", "libmp3lame",
@@ -160,7 +219,7 @@ export async function generateVoiceover(
   if (elevenKey) {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        console.log(`[tts] ElevenLabs generating narration for section ${section.id} (attempt ${attempt})...`);
+        console.log(`[tts] ElevenLabs generating narration for section ${section.id} (${voice})...`);
         await generateElevenLabsTTS(text, voice, audioPath);
         const stat = await fs.stat(audioPath).catch(() => null);
         if (stat && stat.size > 200) {
@@ -175,10 +234,24 @@ export async function generateVoiceover(
     }
   }
 
-  // 2. High-Quality Free Spoken TTS Fallback (Guarantees real voice is always heard)
+  // 2. Microsoft Edge Neural TTS (Natural human voices: Brian, Christopher, Guy, Aria, etc.)
   try {
-    console.log(`[tts] Synthesizing spoken voiceover via Free High-Quality TTS for section ${section.id}...`);
-    await generateFreeTTS(text, audioPath);
+    console.log(`[tts] Synthesizing natural neural voiceover via Edge-TTS (${voice}) for section ${section.id}...`);
+    await generateEdgeTTS(text, voice, audioPath);
+    const stat = await fs.stat(audioPath).catch(() => null);
+    if (stat && stat.size > 200) {
+      const durationMs = await getAudioDurationMs(audioPath);
+      console.log(`[tts] Edge-TTS complete for section ${section.id}: ${(durationMs / 1000).toFixed(1)}s`);
+      return { audioPath, durationMs };
+    }
+  } catch (edgeErr: any) {
+    console.warn(`[tts] Edge-TTS fallback failed for section ${section.id} (${edgeErr.message}), trying Free Spoken TTS...`);
+  }
+
+  // 3. High-Quality Free Spoken TTS Fallback (with Male/Female audio conditioning)
+  try {
+    console.log(`[tts] Synthesizing spoken voiceover via Free TTS (${voice}) for section ${section.id}...`);
+    await generateFreeTTS(text, voice, audioPath);
     const stat = await fs.stat(audioPath).catch(() => null);
     if (stat && stat.size > 200) {
       const durationMs = await getAudioDurationMs(audioPath);
@@ -189,7 +262,7 @@ export async function generateVoiceover(
     console.warn(`[tts] Free TTS fallback failed for section ${section.id}:`, freeErr.message);
   }
 
-  // 3. Fallback: Proportional natural silence pacing
+  // 4. Fallback: Proportional natural silence pacing
   const estimatedMs = estimateDuration(text);
   console.log(`[tts] Section ${section.id}: pacing duration set to ${(estimatedMs / 1000).toFixed(1)}s`);
   await generateSilence(audioPath, estimatedMs);

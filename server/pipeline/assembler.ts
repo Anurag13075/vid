@@ -13,8 +13,8 @@ type ProgressFn = (step: number, total: number, label: string) => void | Promise
 const OUTPUT_WIDTH = 1920;
 const OUTPUT_HEIGHT = 1080;
 const FPS = 30;
-const CRF = 23; // Broadcast 1080p quality
-const PRESET = "ultrafast";
+const CRF = 21; // Pristine 1080p broadcast visual quality
+const PRESET = "veryfast"; // High-efficiency CABAC encoding (eliminates pixelation and macroblocking)
 const THREADS = Math.min(os.cpus()?.length || 2, 2);
 
 const CUT_TARGET_SEC = 10.0;
@@ -183,8 +183,7 @@ async function renderCut(
     "-t", durationSec.toFixed(3),
     "-r", String(FPS),
     "-threads", String(THREADS),
-    "-c:v", "libx264", "-crf", "24", "-preset", PRESET,
-    "-b:v", "1200k", "-maxrate", "1800k", "-bufsize", "3000k",
+    "-c:v", "libx264", "-crf", "20", "-preset", PRESET,
     "-pix_fmt", "yuv420p",
     "-g", "30", "-keyint_min", "30",
     "-video_track_timescale", "30000",
@@ -495,16 +494,11 @@ async function finalProductionMix(
   const partOutput = outputPath + ".part.mp4";
   await fs.unlink(partOutput).catch(() => {});
 
-  // Dynamic bitrate calculation targeting ~55 MB download package
   const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
-  const safeDur = Math.max(voDur, 60);
-  const totalBitrateKbps = Math.floor(450560 / safeDur);
-  const targetVideoKbps = Math.max(380, Math.min(1400, totalBitrateKbps - 96));
-  const videoBitrateStr = `${targetVideoKbps}k`;
-  const maxRateStr = `${Math.round(targetVideoKbps * 1.35)}k`;
-  const bufSizeStr = `${Math.round(targetVideoKbps * 2.0)}k`;
-  const targetCrf = targetVideoKbps < 600 ? "27" : "25";
-  console.log(`[assembler] Dynamic 55MB encode profile: dur=${safeDur.toFixed(1)}s videoBitrate=${videoBitrateStr} crf=${targetCrf}`);
+  const targetCrf = "21"; // High visual fidelity, zero macroblocks or pixelation
+  const maxRateStr = "3500k";
+  const bufSizeStr = "6000k";
+  console.log(`[assembler] Pristine broadcast encode profile: dur=${voDur.toFixed(1)}s crf=${targetCrf} preset=${PRESET}`);
 
   // ── Tier 1: Full broadcast mix (ASS subtitles + clean balanced audio mastering) ──
   try {
@@ -523,11 +517,11 @@ async function finalProductionMix(
         "-map", "0:v", "-map", "[audio]",
         "-vf", videoFilterStr,
         "-c:v", "libx264", "-crf", targetCrf,
-        "-b:v", videoBitrateStr, "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
+        "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
         "-preset", PRESET,
         "-profile:v", "high", "-level", "4.1",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
         "-movflags", "+faststart",
         "-shortest",
         "-y", partOutput,
@@ -540,11 +534,11 @@ async function finalProductionMix(
         "-map", "0:v", "-map", "[audio]",
         "-vf", videoFilterStr,
         "-c:v", "libx264", "-crf", targetCrf,
-        "-b:v", videoBitrateStr, "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
+        "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
         "-preset", PRESET,
         "-profile:v", "high", "-level", "4.1",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
         "-movflags", "+faststart",
         "-shortest",
         "-y", partOutput,
@@ -571,11 +565,11 @@ async function finalProductionMix(
       "-map", "0:v", "-map", "1:a",
       "-vf", videoFilterStr,
       "-c:v", "libx264", "-crf", targetCrf,
-      "-b:v", videoBitrateStr, "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
+      "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
       "-preset", PRESET,
       "-profile:v", "high", "-level", "4.1",
       "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
+      "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
       "-movflags", "+faststart",
       "-shortest",
       "-y", partOutput,

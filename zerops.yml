@@ -19,7 +19,8 @@ zerops:
       base: nodejs@22
       prepareCommands:
         - sudo apk update
-        - sudo apk add --no-cache ffmpeg ttf-dejavu
+        - sudo apk add --no-cache ffmpeg ttf-dejavu py3-pip python3
+        - sudo pip install --no-cache-dir edge-tts --break-system-packages
       ports:
         - port: 5000
           httpSupport: true
