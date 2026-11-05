@@ -371,126 +371,105 @@ async function mergeAudio(audioPaths, outputPath, options) {
         "-y", outputPath,
     ], options);
 }
-// ─── Final Production Mix (Resilient 3-Tier Mixing Engine) ───────────────────
+// ─── Final Production Mix (Resilient & Instant Mixing Engine) ─────────────────
 async function finalProductionMix(videoPath, voiceoverPath, bgmPath, assPath, outputPath, videoTitle, sectionTimings, accentHex, options) {
     const hasBgm = bgmPath && (await fs.stat(bgmPath).catch(() => null))?.size;
     const hasAss = assPath && (await fs.stat(assPath).catch(() => null))?.size;
-    const vfFilters = [];
-    if (hasAss && assPath) {
-        vfFilters.push(`ass='${escapeFilterPath(assPath)}'`);
-        console.log("[assembler] Applied broadcast ASS subtitles & overlays stream");
-    }
-    vfFilters.push("format=yuv420p");
-    const videoFilterStr = vfFilters.join(",");
+    const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
 
     const partOutput = outputPath + ".part.mp4";
     await fs.unlink(partOutput).catch(() => {});
 
-    const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
-    const targetCrf = "21"; // High visual fidelity, zero macroblocks or pixelation
-    const maxRateStr = "3500k";
-    const bufSizeStr = "6000k";
-    console.log(`[assembler] Pristine broadcast encode profile: dur=${voDur.toFixed(1)}s crf=${targetCrf} preset=${PRESET}`);
+    // Step A: Master final audio (Voiceover + BGM) with explicit duration stop
+    const masteredAudio = outputPath + ".audio.aac";
+    await fs.unlink(masteredAudio).catch(() => {});
 
-    // ── Tier 1: Full broadcast mix (ASS subtitles + clean balanced audio mastering) ──
     try {
         if (hasBgm && bgmPath) {
             const fadeOutStart = Math.max(voDur - 2.5, 0);
+            console.log(`[assembler] Mastering voiceover + background music (duration: ${voDur.toFixed(1)}s)...`);
             await ffmpeg([
-                "-i", videoPath,
                 "-i", voiceoverPath,
                 "-stream_loop", "-1", "-i", bgmPath,
                 "-filter_complex", [
-                    `[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.10,afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
-                    `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+                    `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.10,afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
+                    `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
                     `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2[audio]`,
                 ].join(";"),
-                "-map", "0:v", "-map", "[audio]",
-                "-vf", videoFilterStr,
-                "-c:v", "libx264", "-crf", targetCrf,
-                "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
-                "-preset", PRESET,
-                "-profile:v", "high", "-level", "4.1",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-                "-movflags", "+faststart",
-                "-shortest",
-                "-y", partOutput,
+                "-map", "[audio]",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                "-t", voDur.toFixed(3),
+                "-y", masteredAudio,
+            ], options);
+        } else {
+            console.log(`[assembler] Direct voiceover mastering (duration: ${voDur.toFixed(1)}s)...`);
+            await ffmpeg([
+                "-i", voiceoverPath,
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                "-t", voDur.toFixed(3),
+                "-y", masteredAudio,
             ], options);
         }
-        else {
+    } catch (audioErr) {
+        console.warn(`[assembler] BGM audio mixing failed (${audioErr.message}). Falling back to direct voiceover...`);
+        await ffmpeg([
+            "-i", voiceoverPath,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+            "-t", voDur.toFixed(3),
+            "-y", masteredAudio,
+        ], options);
+    }
+
+    // Step B: Final Production Mix
+    const caps = getFFmpegCapabilities();
+    const canBurnAss = Boolean(caps.hasAss && hasAss && assPath);
+
+    // Tier 1: Try burning ASS subtitles if supported by the active FFmpeg build
+    if (canBurnAss) {
+        try {
+            console.log("[assembler] Burning broadcast ASS subtitles into 1080p timeline...");
             await ffmpeg([
                 "-i", videoPath,
-                "-i", voiceoverPath,
-                "-filter_complex", `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[audio]`,
-                "-map", "0:v", "-map", "[audio]",
-                "-vf", videoFilterStr,
-                "-c:v", "libx264", "-crf", targetCrf,
-                "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
-                "-preset", PRESET,
+                "-i", masteredAudio,
+                "-vf", `ass='${escapeFilterPath(assPath)}',format=yuv420p`,
+                "-c:v", "libx264", "-crf", String(CRF),
+                "-preset", "veryfast",
                 "-profile:v", "high", "-level", "4.1",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+                "-c:a", "copy",
+                "-t", voDur.toFixed(3),
                 "-movflags", "+faststart",
-                "-shortest",
                 "-y", partOutput,
-            ], options);
+            ], { ...options, timeoutMs: 300000 });
+
+            await fs.rename(partOutput, outputPath);
+            await fs.unlink(masteredAudio).catch(() => {});
+            console.log("[assembler] Tier 1 production mix (burned ASS subtitles) successful");
+            return;
+        } catch (burnErr) {
+            await fs.unlink(partOutput).catch(() => {});
+            if (options?.signal?.aborted || burnErr?.message?.includes("cancelled") || burnErr?.message?.includes("aborted")) {
+                throw burnErr;
+            }
+            console.warn(`[assembler] Burned ASS pass skipped (${burnErr.message}). Switching to instant lossless stream mux...`);
         }
-        await fs.rename(partOutput, outputPath);
-        console.log("[assembler] Tier 1 production mix successful & atomically verified");
-        return;
-    }
-    catch (err) {
-        await fs.unlink(partOutput).catch(() => {});
-        if (options?.signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
-            throw err;
-        }
-        console.warn(`[assembler] Tier 1 mix failed (${err.message}). Retrying Tier 2 (safe mix)...`);
     }
 
-    // ── Tier 2: Safe mix with ASS subtitles + direct stereo audio ──
-    try {
-        await ffmpeg([
-            "-i", videoPath,
-            "-i", voiceoverPath,
-            "-map", "0:v", "-map", "1:a",
-            "-vf", videoFilterStr,
-            "-c:v", "libx264", "-crf", targetCrf,
-            "-maxrate", maxRateStr, "-bufsize", bufSizeStr,
-            "-preset", PRESET,
-            "-profile:v", "high", "-level", "4.1",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-            "-movflags", "+faststart",
-            "-shortest",
-            "-y", partOutput,
-        ], options);
-        await fs.rename(partOutput, outputPath);
-        console.log("[assembler] Tier 2 safe mix successful");
-        return;
-    }
-    catch (err) {
-        await fs.unlink(partOutput).catch(() => {});
-        if (options?.signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
-            throw err;
-        }
-        console.warn(`[assembler] Tier 2 mix failed (${err.message}). Retrying Tier 3 (direct stream mux)...`);
-    }
-
-    // ── Tier 3: Direct stream mux (instant 2s copy, guaranteed to produce valid video) ──
+    // Tier 2: Instant Lossless Direct Stream Mux (Completes in 2-3s, pristine visual clarity)
+    console.log("[assembler] Executing instant lossless stream mux (preserving 1080p cuts & mastered audio)...");
     await ffmpeg([
         "-i", videoPath,
-        "-i", voiceoverPath,
-        "-map", "0:v", "-map", "1:a",
+        "-i", masteredAudio,
+        "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-c:a", "copy",
+        "-t", voDur.toFixed(3),
         "-movflags", "+faststart",
-        "-shortest",
         "-y", partOutput,
     ], options);
+
     await fs.rename(partOutput, outputPath);
-    console.log("[assembler] Tier 3 direct stream mux successful");
-    console.log("[assembler] Tier 3 direct mux completed successfully");
+    await fs.unlink(masteredAudio).catch(() => {});
+    console.log("[assembler] Final production mix completed successfully!");
 }
 // ─── Thumbnail Extraction ────────────────────────────────────────────────────
 async function extractThumbnail(videoPath, thumbPath, options) {
