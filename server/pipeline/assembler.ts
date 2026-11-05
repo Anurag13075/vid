@@ -578,7 +578,6 @@ async function finalProductionMix(
   await fs.unlink(masteredAudio).catch(() => {});
   console.log("[assembler] Final production mix completed successfully!");
 }
-}
 
 // ─── Thumbnail Extraction ────────────────────────────────────────────────────
 async function extractThumbnail(
