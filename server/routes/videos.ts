@@ -7,6 +7,7 @@ import { createVideo, getVideo, listVideos, updateVideo } from "../db.js";
 import { startPipeline, startIncrementalReRender, cancelVideoJob } from "../pipeline/orchestrator.js";
 import { VOICES } from "../pipeline/voiceover.js";
 import { interpretVoiceCommand } from "../pipeline/commandInterpreter.js";
+import { ffmpeg, getExactDuration } from "../pipeline/ffmpeg.js";
 
 const router: ReturnType<typeof Router> = Router();
 
@@ -250,8 +251,70 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/videos/:id/download — Native high-speed attachment download
-router.get("/:id/download", async (req: Request, res: Response) => {
+// In-flight compression locks to prevent duplicate simultaneous FFmpeg tasks
+const compressionLocks = new Map<string, Promise<string>>();
+
+async function getOrGenerateCompressedVideo(dir: string, finalMp4Path: string, videoId: string): Promise<string> {
+  const compressedPath = path.join(dir, "compressed.mp4");
+
+  if (fs.existsSync(compressedPath)) {
+    try {
+      const stat = await fs.promises.stat(compressedPath);
+      if (stat.size > 500 * 1024) {
+        return compressedPath;
+      }
+    } catch {}
+  }
+
+  if (compressionLocks.has(videoId)) {
+    return compressionLocks.get(videoId)!;
+  }
+
+  const compressPromise = (async () => {
+    try {
+      console.log(`[compress] Starting data-saver compression for video ${videoId} (target <50MB)... `);
+      let dur = 300;
+      try {
+        const measured = await getExactDuration(finalMp4Path);
+        if (measured > 0) dur = measured;
+      } catch {}
+
+      // Target size: 42 MB (352,321,536 bits budget)
+      const targetTotalBps = (42 * 1024 * 1024 * 8) / Math.max(dur, 20);
+      const audioKbps = 96;
+      const videoKbps = Math.min(1800, Math.max(220, Math.floor((targetTotalBps - audioKbps * 1000) / 1000)));
+
+      const tmpOut = path.join(dir, `compressed_${Date.now()}.mp4`);
+      await ffmpeg([
+        "-i", finalMp4Path,
+        "-vf", "scale=-2:720",
+        "-c:v", "libx264",
+        "-b:v", `${videoKbps}k`,
+        "-maxrate", `${Math.floor(videoKbps * 1.35)}k`,
+        "-bufsize", `${Math.floor(videoKbps * 2)}k`,
+        "-preset", "veryfast",
+        "-threads", "2",
+        "-c:a", "aac",
+        "-b:a", `${audioKbps}k`,
+        "-ar", "44100",
+        "-movflags", "+faststart",
+        "-y", tmpOut,
+      ]);
+
+      await fs.promises.rename(tmpOut, compressedPath);
+      console.log(`[compress] Compressed video ready for ${videoId} at ${compressedPath}`);
+      return compressedPath;
+    } finally {
+      compressionLocks.delete(videoId);
+    }
+  })();
+
+  compressionLocks.set(videoId, compressPromise);
+  return compressPromise;
+}
+
+// GET /api/videos/:id/compress-status — Check or trigger data-saver compression
+router.get("/:id/compress-status", async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
     const candidateDirs = [
@@ -259,25 +322,98 @@ router.get("/:id/download", async (req: Request, res: Response) => {
       path.resolve("data", "videos", id),
     ];
 
-    let targetFile: string | null = null;
+    let foundDir: string | null = null;
+    let compressedPath: string | null = null;
     for (const d of candidateDirs) {
-      const f = path.join(d, "final.mp4");
-      if (fs.existsSync(f)) {
-        targetFile = f;
+      if (fs.existsSync(path.join(d, "final.mp4"))) {
+        foundDir = d;
+        const comp = path.join(d, "compressed.mp4");
+        if (fs.existsSync(comp)) compressedPath = comp;
         break;
       }
     }
 
-    if (!targetFile) {
+    if (!foundDir) {
+      return res.status(404).json({ error: "Master video not found" });
+    }
+
+    if (compressedPath) {
+      try {
+        const stat = await fs.promises.stat(compressedPath);
+        if (stat.size > 500 * 1024) {
+          return res.json({
+            ready: true,
+            sizeMb: Number((stat.size / (1024 * 1024)).toFixed(1)),
+            url: `/api/videos/${id}/download`,
+          });
+        }
+      } catch {}
+    }
+
+    const isCompressing = compressionLocks.has(id);
+    if (!isCompressing && req.query.trigger === "1") {
+      const finalMp4 = path.join(foundDir, "final.mp4");
+      getOrGenerateCompressedVideo(foundDir, finalMp4, id).catch((err) => {
+        console.error(`[compress] Background trigger failed: ${err.message}`);
+      });
+      return res.json({ ready: false, compressing: true });
+    }
+
+    res.json({ ready: false, compressing: isCompressing });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/videos/:id/download — Native high-speed attachment download
+// Supports ?master=1 for original 1-2GB master, or default data-saver (<50MB)
+router.get("/:id/download", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const isMaster = req.query.master === "1" || req.query.quality === "master" || req.query.full === "1";
+    const candidateDirs = [
+      path.join(process.cwd(), "data", "videos", id),
+      path.resolve("data", "videos", id),
+    ];
+
+    let targetFile: string | null = null;
+    let foundDir: string | null = null;
+    for (const d of candidateDirs) {
+      const f = path.join(d, "final.mp4");
+      if (fs.existsSync(f)) {
+        targetFile = f;
+        foundDir = d;
+        break;
+      }
+    }
+
+    if (!targetFile || !foundDir) {
       return res.status(404).json({ error: "Video file not found or still rendering" });
     }
 
     const video = await getVideo(id);
     const rawTitle = video?.title || "VidRush-Video";
     const cleanTitle = rawTitle.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
-    const downloadName = `${cleanTitle}_1080p.mp4`;
 
-    res.download(path.resolve(targetFile), downloadName);
+    if (isMaster) {
+      const downloadName = `${cleanTitle}_1080p_Master.mp4`;
+      return res.download(path.resolve(targetFile), downloadName);
+    }
+
+    let sendFile = targetFile;
+    let downloadName = `${cleanTitle}_DataSaver.mp4`;
+
+    try {
+      const compressedFile = await getOrGenerateCompressedVideo(foundDir, targetFile, id);
+      const stat = await fs.promises.stat(compressedFile);
+      const sizeMb = (stat.size / (1024 * 1024)).toFixed(1);
+      sendFile = compressedFile;
+      downloadName = `${cleanTitle}_${sizeMb}MB.mp4`;
+    } catch (compressErr: any) {
+      console.warn(`[download] Compression failed, falling back to original: ${compressErr.message}`);
+    }
+
+    res.download(path.resolve(sendFile), downloadName);
   } catch (err: any) {
     res.status(500).json({ error: "Download failed: " + err.message });
   }
