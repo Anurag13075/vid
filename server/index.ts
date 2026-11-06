@@ -6,7 +6,7 @@ import path from "path";
 import fs from "fs";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
-import { initDb, getVideo, listVideos } from "./db.js";
+import { initDb, getVideo, listVideos, updateVideo } from "./db.js";
 import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
 import { startPipeline } from "./pipeline/orchestrator.js";
 import { getDataDir } from "./pipeline/tempDir.js";
@@ -167,6 +167,19 @@ async function main() {
     const recoverableStages = new Set(["queued", "researching", "writing", "voiceover", "footage", "rendering"]);
     const recoverableVideos = (await listVideos()).filter((video) => recoverableStages.has(video.stage));
     for (const video of recoverableVideos) {
+      // A job that has been queued across a restart has no active worker left.
+      // Do not let old abandoned rows block every new job in the single-worker queue.
+      const ageMs = Date.now() - new Date(video.updated_at || video.created_at).getTime();
+      if (video.stage === "queued" && ageMs > 30 * 60 * 1000) {
+        await updateVideo(video.id, {
+          stage: "error",
+          progress: 0,
+          message: "This job expired while waiting for a processing worker. Please start a new video.",
+          error_message: "Queued job expired after 30 minutes without starting.",
+        });
+        console.warn(`[startup] Expired stale queued job ${video.id}`);
+        continue;
+      }
       console.log(`[startup] Resuming interrupted VidRush job ${video.id} from ${video.stage}`);
       startPipeline(video.id);
     }

@@ -155,14 +155,33 @@ export function startPipeline(videoId: string) {
 }
 
 async function runPipeline(videoId: string, signal?: AbortSignal) {
-  const video = await getVideo(videoId);
-  if (!video) return;
+  let video: Awaited<ReturnType<typeof getVideo>>;
+  let jobTmp = "";
+  try {
+    video = await getVideo(videoId);
+    if (!video) return;
+    jobTmp = path.join(getTempDir(), videoId);
+    await fs.mkdir(jobTmp, { recursive: true });
+    await fs.mkdir(getVideoOutputDir(videoId), { recursive: true });
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[orchestrator] Failed to initialize job ${videoId}:`, err);
+    await updateVideo(videoId, {
+      stage: "error" as Stage,
+      progress: 0,
+      message: `Pipeline initialization failed: ${message}`,
+      error_message: message,
+    }).catch(() => {});
+    jobQueue.emit(videoId, {
+      stage: "error" as Stage,
+      progress: 0,
+      message: `Pipeline initialization failed: ${message}`,
+      errorMessage: message,
+    });
+    return;
+  }
 
   const { title, voice, length, theme } = video;
-  const vidrushTmp = getTempDir();
-  const jobTmp = path.join(vidrushTmp, videoId);
-  await fs.mkdir(jobTmp, { recursive: true });
-  await fs.mkdir(getVideoOutputDir(videoId), { recursive: true });
   const checkpoint = await readCheckpoint(videoId);
 
   try {

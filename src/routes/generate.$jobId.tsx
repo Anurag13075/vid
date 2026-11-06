@@ -125,17 +125,18 @@ function GeneratePage() {
   const readyClips = job.clips?.filter((c) => c.status === "ready").length ?? 0;
   const totalClips = job.clips?.length ?? 0;
 
-  // Show queue screen while still in early stages
-  const isQueued = job.stage === "queued" || job.stage === "researching";
+  // Only a job waiting for a worker is actually queued. Research is active work.
+  const isQueued = job.stage === "queued";
+  const isResearching = job.stage === "researching";
 
-  if (isQueued) {
+  if (isQueued || isResearching) {
     return (
       <div className="dark-app min-h-screen flex flex-col">
         <header className="h-14 border-b border-[var(--border)] flex items-center px-5 justify-between shrink-0">
           <Logo />
           <div className="flex items-center gap-3">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-            <span className="text-[12px] text-[var(--text-secondary)]">In queue</span>
+            <span className="text-[12px] text-[var(--text-secondary)]">{job.stage === "queued" ? "In queue" : "Researching"}</span>
             <button
               onClick={handleCancel}
               disabled={isCancelling}
@@ -155,9 +156,9 @@ function GeneratePage() {
                 <div className="h-5 w-5 rounded-full bg-white/80 animate-pulse" />
               </div>
             </div>
-            <h2 className="text-[28px] font-bold text-white mb-3">You're in queue</h2>
+            <h2 className="text-[28px] font-bold text-white mb-3">{isQueued ? "You're in queue" : "Researching your topic"}</h2>
             <p className="text-[14px] text-[var(--text-secondary)] leading-relaxed mb-4">
-              Your video is being researched and processed.
+              {job.stage === "queued" ? "Your video is waiting for a processing worker." : "Your video is being researched."}
             </p>
             <p className="text-[12px] text-[var(--text-muted)] mb-2">{job.message}</p>
             <p className="text-[12px] text-[var(--text-muted)] mb-6">

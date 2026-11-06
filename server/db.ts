@@ -226,7 +226,7 @@ export async function listVideos(): Promise<any[]> {
     );
   }
   const res = await query(
-    "SELECT id, title, stage, progress, message, video_url, thumbnail_url, short_video_url, duration_seconds, created_at FROM videos ORDER BY created_at DESC LIMIT 50"
+    "SELECT id, title, stage, progress, message, video_url, thumbnail_url, short_video_url, duration_seconds, created_at, updated_at FROM videos ORDER BY created_at DESC LIMIT 50"
   );
   return res?.rows || [];
 }
