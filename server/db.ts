@@ -1,5 +1,6 @@
 import pg from "pg";
 import fs from "fs";
+import path from "path";
 import { getDataDir } from "./pipeline/tempDir.js";
 
 const { Pool } = pg;

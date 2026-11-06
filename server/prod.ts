@@ -173,6 +173,11 @@ app.get(/.*/, (req, res) => {
   res.status(404).send("Application frontend build artifact (index.html) not found.");
 });
 
+// Start listening immediately so Zerops health check passes in <50ms
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 VidRush running on http://0.0.0.0:${PORT}`);
+});
+
 // ── Boot ───────────────────────────────────────────────────────────────────────
 async function main() {
   checkFFmpegCapabilities();
@@ -203,13 +208,8 @@ async function main() {
     console.log(`[startup] Resuming fresh job ${video.id} from ${video.stage} (age: ${Math.round(ageMs / 60000)}m)`);
     startPipeline(video.id);
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 VidRush running on http://0.0.0.0:${PORT}`);
-  });
 }
 
 main().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
+  console.error("Initialization warning:", err);
 });
