@@ -108,6 +108,15 @@ app.get("/api/pipeline/:id/status", async (req, res) => {
         videoUrl: video.video_url,
         shortVideoUrl: video.short_video_url,
       });
+
+      if (
+        (video.stage === "queued" || video.stage === "researching") &&
+        !jobQueue.isJobQueued(videoId) &&
+        !jobQueue.isJobRunning(videoId)
+      ) {
+        console.log(`[sse] Auto-recovering orphaned job ${videoId} in stage "${video.stage}"`);
+        startPipeline(videoId);
+      }
     }
   } catch {}
 

@@ -7,6 +7,7 @@ import { createVideo, getVideo, listVideos, updateVideo } from "../db.js";
 import { startPipeline, startIncrementalReRender, cancelVideoJob } from "../pipeline/orchestrator.js";
 import { VOICES } from "../pipeline/voiceover.js";
 import { interpretVoiceCommand } from "../pipeline/commandInterpreter.js";
+import { jobQueue } from "../pipeline/queue.js";
 import { ffmpeg, getExactDuration } from "../pipeline/ffmpeg.js";
 
 const router: ReturnType<typeof Router> = Router();
@@ -219,6 +220,15 @@ router.get("/:id", async (req: Request, res: Response) => {
 
     const video = await getVideo(id);
     if (!video) return res.status(404).json({ error: "Not found" });
+
+    if (
+      (video.stage === "queued" || video.stage === "researching") &&
+      !jobQueue.isJobQueued(id) &&
+      !jobQueue.isJobRunning(id)
+    ) {
+      console.log(`[api] Auto-recovering orphaned job ${id} in stage "${video.stage}"`);
+      startPipeline(id);
+    }
 
     const normalized = {
       id: video.id,
