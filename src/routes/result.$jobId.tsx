@@ -1279,6 +1279,18 @@ export function ResultPage() {
               Original Master (1–2GB)
             </a>
 
+            {job.shortVideoUrl && (
+              <a
+                href={job.shortVideoUrl}
+                download={`${(job.title || "VidRush-Video").replace(/[^a-zA-Z0-9_-]/g, "_")}_Short.mp4`}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 transition-all font-medium text-emerald-200 text-[13px] active:scale-95"
+                title="Automatically generated 9:16 vertical Short"
+              >
+                <Download className="h-4 w-4" />
+                Download Short (9:16)
+              </a>
+            )}
+
             <button
               onClick={() => {
                 const scriptText = scriptData.sections

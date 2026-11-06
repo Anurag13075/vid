@@ -277,9 +277,11 @@ export async function findMultipleFootage(
     .map(sanitizeKeyword)
     .filter(Boolean);
 
-  const keywordsToTry = cleanKeywords.length > 0
+  // Three targeted searches are enough for a scene and keep free-plan API usage bounded.
+  const keywordsToTry = (cleanKeywords.length > 0
     ? cleanKeywords
-    : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)];
+    : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)]
+  ).slice(0, 3);
 
   // Phase 1: Pexels Videos API
   for (const keyword of keywordsToTry) {
@@ -299,7 +301,7 @@ export async function findMultipleFootage(
 
   // Phase 3: Broad topic-derived fallback searches
   if (clips.length < clipsNeeded) {
-    const topicFallbacks = buildTopicFallbacks(title, section);
+    const topicFallbacks = buildTopicFallbacks(title, section).slice(0, 1);
     for (const keyword of topicFallbacks) {
       if (clips.length >= clipsNeeded) break;
       const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
@@ -317,20 +319,6 @@ export async function findMultipleFootage(
       if (clips.length >= clipsNeeded) break;
       const photos = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
       clips.push(...photos);
-    }
-  }
-
-  // Phase 5: Guaranteed Universal Cinematic Abstract B-roll
-  if (clips.length < clipsNeeded) {
-    const genericQueries = ["technology abstract", "cinematic lights", "city timelapse", "business office", "motion background"];
-    for (const keyword of genericQueries) {
-      if (clips.length >= clipsNeeded) break;
-      const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
-      clips.push(...pexelsFound);
-      if (clips.length < clipsNeeded) {
-        const photos = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
-        clips.push(...photos);
-      }
     }
   }
 

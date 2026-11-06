@@ -25,6 +25,7 @@ export interface Script {
   description: string;
   mood: "dramatic" | "uplifting" | "neutral" | "tense";
   thumbnail_hook: string;
+  title_variants?: string[];
   sources?: string[];
   tags?: string[];
   sections: ScriptSection[];
@@ -63,6 +64,7 @@ export interface VideoJob {
   renderProgress?: number;
   videoUrl?: string;
   thumbnailUrl?: string;
+  shortVideoUrl?: string;
   durationSeconds?: number;
   errorMessage?: string;
   createdAt: string;
@@ -80,5 +82,6 @@ export interface SseEvent {
   renderProgress?: number;
   videoUrl?: string;
   thumbnailUrl?: string;
+  shortVideoUrl?: string;
   errorMessage?: string;
 }

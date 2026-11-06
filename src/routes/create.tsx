@@ -48,21 +48,20 @@ interface BackgroundOption {
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
-// Provider label stays "MiniMax TTS" everywhere in the UI.
-// The actual synthesis is done by edge-tts on the server (voiceover.ts).
+// The app uses free Edge-TTS first, with a Google TTS fallback on the server.
 const VOICES: VoiceOption[] = [
-  { id: "presenter_female",   label: "Aria",        provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Warm"],         gender: "Female" },
-  { id: "audiobook_female_1", label: "Ava",         provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Natural"],      gender: "Female" },
-  { id: "presenter_male",     label: "Brian",       provider: "MiniMax TTS", tags: ["Male", "Young", "American", "Deep"],           gender: "Male" },
-  { id: "audiobook_male_1",   label: "Christopher", provider: "MiniMax TTS", tags: ["Male", "Mature", "American", "Authoritative"], gender: "Male" },
-  { id: "newscast_male",      label: "Guy",         provider: "MiniMax TTS", tags: ["Male", "Young", "American", "Neutral"],        gender: "Male" },
-  { id: "casual_guy",         label: "Andrew",      provider: "MiniMax TTS", tags: ["Male", "Young", "American", "Conversational"], gender: "Male" },
-  { id: "wise_woman",         label: "Eleanor",     provider: "MiniMax TTS", tags: ["Female", "Mature", "British", "Narrative"],    gender: "Female" },
-  { id: "deep_space_master",  label: "Magnus",      provider: "MiniMax TTS", tags: ["Male", "Mature", "American", "Epic"],          gender: "Male" },
-  { id: "calm_woman",         label: "Serenity",    provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Calm"],         gender: "Female" },
-  { id: "audiobook_female_2", label: "Grace",       provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Storytelling"], gender: "Female" },
-  { id: "audiobook_male_2",   label: "Drake",       provider: "MiniMax TTS", tags: ["Male", "Mature", "American", "Documentary"],   gender: "Male" },
-  { id: "newscast_female",    label: "Natalie",     provider: "MiniMax TTS", tags: ["Female", "Young", "American", "Professional"], gender: "Female" },
+  { id: "presenter_female",   label: "Aria",        provider: "Edge-TTS", tags: ["Female", "Young", "American", "Warm"],         gender: "Female" },
+  { id: "audiobook_female_1", label: "Ava",         provider: "Edge-TTS", tags: ["Female", "Young", "American", "Natural"],      gender: "Female" },
+  { id: "presenter_male",     label: "Brian",       provider: "Edge-TTS", tags: ["Male", "Young", "American", "Deep"],           gender: "Male" },
+  { id: "audiobook_male_1",   label: "Christopher", provider: "Edge-TTS", tags: ["Male", "Mature", "American", "Authoritative"], gender: "Male" },
+  { id: "newscast_male",      label: "Guy",         provider: "Edge-TTS", tags: ["Male", "Young", "American", "Neutral"],        gender: "Male" },
+  { id: "casual_guy",         label: "Andrew",      provider: "Edge-TTS", tags: ["Male", "Young", "American", "Conversational"], gender: "Male" },
+  { id: "wise_woman",         label: "Eleanor",     provider: "Edge-TTS", tags: ["Female", "Mature", "British", "Narrative"],    gender: "Female" },
+  { id: "deep_space_master",  label: "Magnus",      provider: "Edge-TTS", tags: ["Male", "Mature", "American", "Epic"],          gender: "Male" },
+  { id: "calm_woman",         label: "Serenity",    provider: "Edge-TTS", tags: ["Female", "Young", "American", "Calm"],         gender: "Female" },
+  { id: "audiobook_female_2", label: "Grace",       provider: "Edge-TTS", tags: ["Female", "Young", "American", "Storytelling"], gender: "Female" },
+  { id: "audiobook_male_2",   label: "Drake",       provider: "Edge-TTS", tags: ["Male", "Mature", "American", "Documentary"],   gender: "Male" },
+  { id: "newscast_female",    label: "Natalie",     provider: "Edge-TTS", tags: ["Female", "Young", "American", "Professional"], gender: "Female" },
 ];
 
 // Default voice: Magnus (deep_space_master) → en-US-ChristopherNeural on the server
@@ -372,8 +371,7 @@ function VoiceStep({
         ))}
         <div className="flex-1" />
         <div className="pb-2 flex items-end">
-          {/* MiniMax TTS label preserved exactly */}
-          <span className="text-[11px] text-[var(--text-muted)]">Powered by MiniMax TTS</span>
+          <span className="text-[11px] text-[var(--text-muted)]">Powered by free Edge-TTS</span>
         </div>
       </div>
 
@@ -478,7 +476,7 @@ function VoiceCard({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <span className="font-semibold text-white text-[14px]">{voice.label}</span>
-          {/* Provider label: "MiniMax TTS" — never changes */}
+          {/* Provider label reflects the free Edge-TTS backend */}
           <span className="text-[11px] text-[var(--text-muted)]">— {voice.provider}</span>
         </div>
         <div className="flex flex-wrap gap-1">
@@ -832,4 +830,4 @@ function QueueScreen() {
       </div>
     </div>
   );
-} 
+}

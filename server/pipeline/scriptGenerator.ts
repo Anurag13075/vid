@@ -3,6 +3,60 @@ import type { Script, ScriptSection } from "./types.js";
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 let cachedGroqModels: string[] | null = null;
+let lastGroqRequestAt = 0;
+
+type ResearchPack = {
+  context: string;
+  sources: string[];
+};
+
+async function fetchResearch(title: string): Promise<ResearchPack> {
+  const empty: ResearchPack = { context: "No external research was available. Avoid inventing precise facts.", sources: [] };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+
+  try {
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(title)}&srlimit=5&format=json&origin=*`;
+    const searchResponse = await fetch(searchUrl, { signal: controller.signal });
+    if (!searchResponse.ok) return empty;
+    const searchData = (await searchResponse.json()) as any;
+    const titles = (searchData.query?.search || []).map((item: any) => String(item.title || "")).filter(Boolean);
+    if (titles.length === 0) return empty;
+
+    const detailUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts|info&exintro=1&explaintext=1&inprop=url&redirects=1&titles=${encodeURIComponent(titles.join("|"))}&format=json&origin=*`;
+    const detailResponse = await fetch(detailUrl, { signal: controller.signal });
+    if (!detailResponse.ok) return empty;
+    const detailData = (await detailResponse.json()) as any;
+    const pages = Object.values(detailData.query?.pages || {}) as any[];
+    const useful = pages
+      .map((page) => ({
+        title: String(page.title || ""),
+        extract: String(page.extract || "").replace(/\s+/g, " ").trim(),
+        url: String(page.fullurl || ""),
+      }))
+      .filter((page) => page.title && page.extract);
+
+    if (useful.length === 0) return empty;
+    const context = useful
+      .map((page) => `SOURCE: ${page.title}\n${page.extract.slice(0, 1800)}`)
+      .join("\n\n")
+      .slice(0, 7000);
+    const sources = useful.map((page) => `${page.title} — ${page.url}`).filter((source) => !source.endsWith("— "));
+    return { context, sources };
+  } catch (err: any) {
+    console.warn(`[research] Public research lookup skipped: ${err.message}`);
+    return empty;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForGroqSlot(): Promise<void> {
+  const minimumGapMs = 1_250;
+  const waitMs = Math.max(0, minimumGapMs - (Date.now() - lastGroqRequestAt));
+  if (waitMs > 0) await sleep(waitMs);
+  lastGroqRequestAt = Date.now();
+}
 
 export async function resolveGroqModels(apiKey: string): Promise<string[]> {
   if (cachedGroqModels && cachedGroqModels.length > 0) return cachedGroqModels;
@@ -194,13 +248,15 @@ async function callGroq(
     const modes = jsonMode ? [true, false] : [false];
 
     for (const useJsonMode of modes) {
+      await waitForGroqSlot();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 85_000);
 
       try {
         const body: Record<string, any> = {
           model,
-          max_tokens: maxTokens,
+          // Keep individual responses safely below free-plan output limits.
+          max_tokens: Math.min(maxTokens, 4096),
           temperature: 0.65,
           messages,
         };
@@ -231,6 +287,12 @@ async function callGroq(
           if (response.status === 404 || response.status === 400) {
             lastError = new Error(`Groq model ${model} failed (${response.status}): ${errText}`);
             break; // next model
+          }
+          if (response.status === 429) {
+            const retryAfter = Number(response.headers.get("retry-after") || 15);
+            lastError = new Error(`Groq rate limit reached; retry after ${retryAfter}s`);
+            await sleep(Math.min(Math.max(retryAfter, 5), 60) * 1000);
+            throw lastError;
           }
           throw new Error(`Groq API error ${response.status}: ${errText}`);
         }
@@ -267,12 +329,16 @@ async function generateSectionBatch(
   count: number,
   wordsPerSection: number,
   isFirst: boolean,
-  isLast: boolean
+  isLast: boolean,
+  researchContext: string
 ): Promise<ScriptSection[]> {
   const firstType = isFirst ? "intro" : "broll";
 
   const prompt = `You are a world-class documentary director and investigative journalist (in the style of Vox, Wendover Productions, and Frontline).
 Write sections ${startId} to ${startId + count - 1} of a comprehensive, publish-ready documentary script about: "${title}".
+
+RESEARCH PACK — treat this as the factual ground truth. Use only facts supported here; if a detail is not present, explain it without inventing precision:
+${researchContext}
 
 Output a JSON object with a single "sections" array containing exactly ${count} section objects:
 {
@@ -280,7 +346,7 @@ Output a JSON object with a single "sections" array containing exactly ${count} 
     {
       "id": ${startId},
       "narration": "Spoken documentary narration...",
-      "visual_keywords": ["specific subject action setting", "historical archival cue", "cinematic B-roll cue"],
+      "visual_keywords": ["direct subject action", "macro technical detail", "establishing environment", "archival or document cue", "human-scale consequence"],
       "section_type": "${firstType}",
       "key_point": "Key statistic, date, or fact highlight",
       "estimated_words": ${wordsPerSection},
@@ -298,10 +364,12 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
 - RETENTION & PACING: Create tension, open loops between sections ("What the public wasn't told was far worse..."), and satisfying payoffs.
 - LENGTH: Each narration MUST be approximately ${wordsPerSection} to ${wordsPerSection + 15} words. Count carefully.
 - JSON SAFETY: NEVER use double quote characters inside narration, key_point, or visual_keywords. For quoted speech or titles, use single quotes. Do not put line breaks inside string values.
-- VISUAL KEYWORDS: Provide exactly 3 DISTINCT, documentary-grade stock footage search terms per section:
+- VISUAL KEYWORDS: Provide exactly 5 DISTINCT, documentary-grade stock footage search terms per section:
   1. Direct Subject/Action: Specific physical entities and operations (e.g. 'semiconductor cleanroom silicon wafer', 'naval battleship firing ocean').
   2. Macro/Technical Detail: Close-up mechanical, blueprint, or tactile detail (e.g. 'microchip circuit board gold wires macro', 'radar scope sweep dark room').
   3. Atmospheric/Aerial Establishing: Contextual environment or drone viewpoint (e.g. 'aerial top down desert test site', 'industrial data center server racks blue').
+  4. Archival/Documentary Evidence: A concrete document, photograph, map, artifact, or public-record visual (e.g. 'declassified document stamped secret', 'historical newspaper printing press').
+  5. Human-Scale Consequence: A specific person, place, or physical result affected by the topic (e.g. 'workers leaving factory gate', 'flooded village street evacuation').
   * STRICT NEGATIVES: NEVER use generic filler like 'business person', 'team meeting', 'laptop desk', 'concept', 'abstract background', 'cinematic'. Use only concrete physical nouns.
 - Output ONLY the valid JSON object. No markdown fences, no preamble.`;
 
@@ -328,7 +396,7 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
       narration: String(sec?.narration || "").trim(),
       visual_keywords:
         Array.isArray(sec?.visual_keywords) && sec.visual_keywords.length > 0
-          ? sec.visual_keywords.slice(0, 3).map((k: any) => String(k).trim())
+          ? Array.from(new Set(sec.visual_keywords.slice(0, 5).map((k: any) => String(k).trim()).filter(Boolean)))
           : [title.toLowerCase().slice(0, 40)],
       section_type: ["intro", "broll", "stat", "graphic", "outro"].includes(sec?.section_type)
         ? sec.section_type
@@ -348,6 +416,7 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
 
 export async function generateScript(title: string, length: string): Promise<Script> {
   const { count, wordsPerSection } = targetSections(length);
+  const research = await fetchResearch(title);
 
   // 1. Generate Metadata
   const metaPrompt = `For a high-end YouTube documentary about "${title}", produce metadata as a JSON object with these keys:
@@ -356,6 +425,7 @@ export async function generateScript(title: string, length: string): Promise<Scr
   "description": "Engaging 180-250 character SEO description highlighting the core mystery and historical stakes",
   "mood": "dramatic",
   "thumbnail_hook": "4-6 powerful words for thumbnail",
+  "title_variants": ["Alternative title 1", "Alternative title 2", "Alternative title 3"],
   "tags": ["topic", "documentary", "history", "deep dive"]
 }
 The "mood" value must be exactly one of: dramatic, tense, neutral, uplifting.
@@ -367,7 +437,7 @@ Do not use double quote characters inside any string value. Output ONLY valid JS
       const raw = await callGroq(
         [
           { role: "system", content: "Output ONLY a valid JSON object." },
-          { role: "user", content: metaPrompt },
+          { role: "user", content: `${metaPrompt}\n\nResearch context:\n${research.context}` },
         ],
         2048
       );
@@ -399,7 +469,8 @@ Do not use double quote characters inside any string value. Output ONLY valid JS
           batchCount,
           adjustedWords,
           isFirst,
-          isLast
+          isLast,
+          research.context
         );
         allSections.push(...sections);
         console.log(
@@ -427,34 +498,11 @@ Do not use double quote characters inside any string value. Output ONLY valid JS
     throw new Error(`Only generated ${allSections.length} sections, minimum 4 required`);
   }
 
-  // 3. Generate Researched Sources & Bibliography
-  let sources: string[] = [];
-  try {
-    const sourcesPrompt = `List 5 to 7 real, authoritative historical or scientific sources, archives, government reports, or academic records relevant to: "${title}".
-Output a JSON object with a "sources" array of strings:
-{ "sources": ["Source 1 with author/agency and title", "Source 2 with author/agency and title"] }
-Do not use double quote characters inside the strings. Output ONLY valid JSON.`;
-
-    const rawSources = await callGroq(
-      [
-        { role: "system", content: "Output ONLY a valid JSON object with a 'sources' array of strings." },
-        { role: "user", content: sourcesPrompt },
-      ],
-      2048
-    );
-
-    const clean = repairJson(rawSources);
-    const parsedSources = JSON.parse(clean);
-    sources = Array.isArray(parsedSources) ? parsedSources : parsedSources?.sources ?? [];
-  } catch (err) {
-    console.warn("[script] Source bibliography generation optional fallback:", err);
-  }
-
-  if (!Array.isArray(sources) || sources.length === 0) {
+  // Use URLs from the public research lookup instead of asking the model to invent bibliography.
+  let sources: string[] = research.sources;
+  if (sources.length === 0) {
     sources = [
-      "National Archives and Records Administration (NARA) Declassified Files",
-      "Department of Energy Historical Nuclear Testing Records",
-      "Comprehensive Historical Overview & Archival Documentation",
+      `Public research lookup returned no usable sources for "${title}". Review factual claims before publishing.`,
     ];
   }
 
@@ -463,6 +511,9 @@ Do not use double quote characters inside the strings. Output ONLY valid JSON.`;
     description: String(meta.description || `Investigative documentary exploring ${title}.`).slice(0, 300),
     mood: ["dramatic", "uplifting", "neutral", "tense"].includes(meta.mood) ? meta.mood : "dramatic",
     thumbnail_hook: String(meta.thumbnail_hook || title.slice(0, 30)).trim(),
+    title_variants: Array.isArray(meta.title_variants)
+      ? meta.title_variants.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 3)
+      : [],
     sources: sources.map(String),
     tags: Array.isArray(meta.tags) ? meta.tags.map(String) : ["documentary", "history"],
     sections: allSections,

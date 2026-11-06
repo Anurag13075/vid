@@ -36,6 +36,8 @@ dist-ssr
 
 # Generated video/audio output
 server/data/
+data/temp/
+data/videos/*/pipeline-state.json
 *.mp4
 !public/*.mp4
 !data/videos/demo/final.mp4

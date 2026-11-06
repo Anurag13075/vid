@@ -3,6 +3,7 @@ import { promises as fs } from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover, getTempDir } from "./voiceover.js";
+import { getDataDir } from "./tempDir.js";
 import { createClipTracker, findMultipleFootage, downloadClip } from "./footageAgent.js";
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
@@ -11,6 +12,68 @@ import { ffprobe, killProcessesForVideo } from "./ffmpeg.js";
 import type { ScriptSection, Clip, SseEvent, Stage, Script } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+interface PipelineCheckpoint {
+  version: 1;
+  stage: "script" | "voiceover" | "footage" | "rendering" | "done";
+  script?: Script;
+  audioPaths: (string | null)[];
+  footagePathsPerSection: (string[] | null)[];
+  clips: Clip[];
+  updatedAt: string;
+}
+
+function getVideoOutputDir(videoId: string): string {
+  return getDataDir(path.join("videos", videoId));
+}
+
+function getCheckpointPath(videoId: string): string {
+  return path.join(getVideoOutputDir(videoId), "pipeline-state.json");
+}
+
+async function readCheckpoint(videoId: string): Promise<PipelineCheckpoint | null> {
+  try {
+    const raw = await fs.readFile(getCheckpointPath(videoId), "utf8");
+    const parsed = JSON.parse(raw) as PipelineCheckpoint;
+    if (parsed?.version !== 1 || !Array.isArray(parsed.audioPaths) || !Array.isArray(parsed.footagePathsPerSection)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCheckpoint(videoId: string, state: Omit<PipelineCheckpoint, "version" | "updatedAt">): Promise<void> {
+  const outputDir = getVideoOutputDir(videoId);
+  await fs.mkdir(outputDir, { recursive: true });
+  const checkpointPath = getCheckpointPath(videoId);
+  const tempPath = `${checkpointPath}.tmp`;
+  const payload: PipelineCheckpoint = { ...state, version: 1, updatedAt: new Date().toISOString() };
+  await fs.writeFile(tempPath, JSON.stringify(payload), "utf8");
+  try {
+    await fs.rename(tempPath, checkpointPath);
+  } catch {
+    // Windows refuses to replace an existing destination with rename().
+    await fs.rm(checkpointPath, { force: true });
+    await fs.rename(tempPath, checkpointPath);
+  }
+}
+
+async function validMediaPath(filePath: string | null | undefined): Promise<boolean> {
+  if (!filePath) return false;
+  const stat = await fs.stat(filePath).catch(() => null);
+  return Boolean(stat && stat.isFile() && stat.size > 2_000);
+}
+
+async function validMediaPaths(paths: string[] | null | undefined): Promise<string[]> {
+  if (!paths?.length) return [];
+  const result: string[] = [];
+  for (const filePath of paths) {
+    if (await validMediaPath(filePath)) result.push(filePath);
+  }
+  return result;
+}
 
 async function emit(videoId: string, event: SseEvent) {
   jobQueue.emit(videoId, event);
@@ -24,8 +87,29 @@ async function emit(videoId: string, event: SseEvent) {
     ...(event.renderProgress !== undefined ? { render_progress: event.renderProgress } : {}),
     ...(event.videoUrl ? { video_url: event.videoUrl } : {}),
     ...(event.thumbnailUrl ? { thumbnail_url: event.thumbnailUrl } : {}),
+    ...(event.shortVideoUrl ? { short_video_url: event.shortVideoUrl } : {}),
     ...(event.errorMessage ? { error_message: event.errorMessage } : {}),
   });
+}
+
+async function downloadFoundClips(
+  foundClips: Clip[],
+  videoId: string,
+  sectionId: number,
+  signal?: AbortSignal
+): Promise<string[]> {
+  const results = await Promise.all(
+    foundClips.map(async (clip, index) => {
+      if (signal?.aborted) throw new Error("Job cancelled by user");
+      try {
+        return await downloadClip(clip, videoId, `${sectionId}_${index}`);
+      } catch (err: any) {
+        console.warn(`[orchestrator] Clip download failed (${sectionId}_${index}):`, err?.message);
+        return null;
+      }
+    })
+  );
+  return results.filter((result): result is string => Boolean(result));
 }
 
 // ─── Clean Cancellation of a Video Generation ──────────────────────────────
@@ -78,30 +162,49 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
   const vidrushTmp = getTempDir();
   const jobTmp = path.join(vidrushTmp, videoId);
   await fs.mkdir(jobTmp, { recursive: true });
+  await fs.mkdir(getVideoOutputDir(videoId), { recursive: true });
+  const checkpoint = await readCheckpoint(videoId);
 
   try {
     if (signal?.aborted) throw new Error("Job cancelled by user");
     // ── Phase 1: Script generation ──────────────────────────────────────
-    await emit(videoId, {
-      stage: "researching" as Stage,
-      progress: 5,
-      message: `Researching topic and historical archives: "${title}"...`,
-    });
+    let script = checkpoint?.script;
+    if (script) {
+      await emit(videoId, {
+        stage: "writing" as Stage,
+        progress: 30,
+        message: `Resuming from saved script (${script.sections.length} scenes, ${script.sources?.length || 0} sources)`,
+        script,
+      });
+    } else {
+      await emit(videoId, {
+        stage: "researching" as Stage,
+        progress: 5,
+        message: `Researching topic and historical archives: "${title}"...`,
+      });
 
-    await emit(videoId, {
-      stage: "writing" as Stage,
-      progress: 15,
-      message: "Writing documentary script with retention hooks and verified facts...",
-    });
+      await emit(videoId, {
+        stage: "writing" as Stage,
+        progress: 15,
+        message: "Writing documentary script with retention hooks and verified facts...",
+      });
 
-    const script = await generateScript(title, length);
+      script = await generateScript(title, length);
+      await writeCheckpoint(videoId, {
+        stage: "script",
+        script,
+        audioPaths: new Array(script.sections.length).fill(null),
+        footagePathsPerSection: new Array(script.sections.length).fill(null),
+        clips: [],
+      });
 
-    await emit(videoId, {
-      stage: "writing" as Stage,
-      progress: 30,
-      message: `Documentary script ready (${script.sections.length} scenes, ${script.sources?.length || 0} sources)`,
-      script,
-    });
+      await emit(videoId, {
+        stage: "writing" as Stage,
+        progress: 30,
+        message: `Documentary script ready (${script.sections.length} scenes, ${script.sources?.length || 0} sources)`,
+        script,
+      });
+    }
 
     // ── Phase 2: Voiceover (Cached by scene) ─────────────────────────────
     await emit(videoId, {
@@ -111,20 +214,38 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
       script,
     });
 
-    const audioPaths: (string | null)[] = [];
+    const audioPaths: (string | null)[] = new Array(script.sections.length).fill(null);
     for (let i = 0; i < script.sections.length; i++) {
       if (signal?.aborted) throw new Error("Job cancelled by user");
       const section = script.sections[i];
       const pct = 32 + Math.round((i / script.sections.length) * 18);
 
       if (!section.narration.trim() && section.section_type !== "graphic") {
-        audioPaths.push(null);
+        continue;
+      }
+
+      const cachedAudio = checkpoint?.audioPaths?.[i];
+      if (await validMediaPath(cachedAudio)) {
+        audioPaths[i] = cachedAudio!;
+        await emit(videoId, {
+          stage: "voiceover" as Stage,
+          progress: pct,
+          message: `Reusing saved voiceover ${i + 1}/${script.sections.length}`,
+          script,
+        });
         continue;
       }
 
       try {
         const { audioPath } = await generateVoiceover(section, videoId, voice);
-        audioPaths.push(audioPath);
+        audioPaths[i] = audioPath;
+        await writeCheckpoint(videoId, {
+          stage: "voiceover",
+          script,
+          audioPaths,
+          footagePathsPerSection: checkpoint?.footagePathsPerSection || new Array(script.sections.length).fill(null),
+          clips: checkpoint?.clips || [],
+        });
         await emit(videoId, {
           stage: "voiceover" as Stage,
           progress: pct,
@@ -136,23 +257,28 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
           throw err;
         }
         console.error(`Voiceover failed for section ${section.id}:`, err.message);
-        audioPaths.push(null);
+        audioPaths[i] = null;
       }
     }
 
     // ── Phase 3: Footage Search & Download ──────────────────────────────
     if (signal?.aborted) throw new Error("Job cancelled by user");
     const usedIds = createClipTracker();
-    const clips: Clip[] = script.sections.map((s) => ({
-      id: s.id,
-      keyword: s.visual_keywords[0] || title.toLowerCase().slice(0, 40),
-      thumbUrl: "",
-      videoUrl: "",
-      source: "pexels" as const,
-      externalId: "",
-      duration: 10,
-      status: s.section_type === "graphic" || !s.narration.trim() ? ("skipped" as const) : ("pending" as const),
-    }));
+    const clips: Clip[] = checkpoint?.clips?.length === script.sections.length
+      ? checkpoint.clips
+      : script.sections.map((s) => ({
+          id: s.id,
+          keyword: s.visual_keywords[0] || title.toLowerCase().slice(0, 40),
+          thumbUrl: "",
+          videoUrl: "",
+          source: "pexels" as const,
+          externalId: "",
+          duration: 10,
+          status: s.section_type === "graphic" || !s.narration.trim() ? ("skipped" as const) : ("pending" as const),
+        }));
+    for (const clip of clips) {
+      if (clip.externalId) usedIds.add(clip.externalId);
+    }
 
     await emit(videoId, {
       stage: "footage" as Stage,
@@ -162,11 +288,27 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
       clips,
     });
 
-    const footagePathsPerSection: (string[] | null)[] = new Array(script.sections.length).fill(null);
+    const footagePathsPerSection: (string[] | null)[] = checkpoint?.footagePathsPerSection?.length === script.sections.length
+      ? checkpoint.footagePathsPerSection.map((paths) => (paths ? [...paths] : null))
+      : new Array(script.sections.length).fill(null);
     for (let i = 0; i < script.sections.length; i++) {
       if (signal?.aborted) throw new Error("Job cancelled by user");
       const section = script.sections[i];
       if (section.section_type === "graphic" || !section.narration.trim() || !audioPaths[i]) {
+        continue;
+      }
+
+      const savedPaths = await validMediaPaths(footagePathsPerSection[i]);
+      if (savedPaths.length > 0) {
+        footagePathsPerSection[i] = savedPaths;
+        clips[i] = { ...clips[i], status: "ready", localPath: savedPaths[0] };
+        await emit(videoId, {
+          stage: "footage" as Stage,
+          progress: 50 + Math.round((i / script.sections.length) * 18),
+          message: `Reusing saved footage for Scene ${i + 1}/${script.sections.length}`,
+          script,
+          clips: [...clips],
+        });
         continue;
       }
 
@@ -180,34 +322,25 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
       });
 
       try {
-        const foundClips = await findMultipleFootage(section, 2, videoId, usedIds, title);
-        const downloadedPaths: string[] = [];
-        if (foundClips.length > 0) {
-          for (let ci = 0; ci < foundClips.length; ci++) {
-            if (signal?.aborted) throw new Error("Job cancelled by user");
-            try {
-              const p = await downloadClip(foundClips[ci], videoId, `${section.id}_${ci}`);
-              downloadedPaths.push(p);
-            } catch (dlErr: any) {
-              console.warn(`[orchestrator] Clip download failed (${section.id}_${ci}):`, dlErr?.message);
-            }
-          }
-        }
+        const foundClips = await findMultipleFootage(section, 3, videoId, usedIds, title);
+        const downloadedPaths = await downloadFoundClips(foundClips, videoId, section.id, signal);
 
         if (downloadedPaths.length > 0) {
           clips[i] = { ...foundClips[0], localPath: downloadedPaths[0], status: "ready" };
           footagePathsPerSection[i] = downloadedPaths;
         } else {
-          // If no clips were downloaded for this section, reuse valid clips from prior sections
-          const prior = footagePathsPerSection.slice(0, i).filter((p): p is string[] => !!p && p.length > 0).flat();
-          if (prior.length > 0) {
-            console.log(`[orchestrator] Reusing ${prior.length} footage clips for Scene ${i + 1}`);
-            footagePathsPerSection[i] = [...prior];
-            clips[i] = { ...(clips[i] || {}), status: "ready", localPath: prior[0] } as any;
-          } else {
-            clips[i] = { ...(clips[i] || {}), status: "failed" } as any;
-          }
+          // Do not reuse unrelated footage: a deliberate dark fallback is less
+          // misleading than showing a previous scene's subject again.
+          console.warn(`[orchestrator] No relevant footage downloaded for Scene ${i + 1}; keeping it unassigned`);
+          clips[i] = { ...(clips[i] || {}), status: "failed" } as any;
         }
+        await writeCheckpoint(videoId, {
+          stage: "footage",
+          script,
+          audioPaths,
+          footagePathsPerSection,
+          clips,
+        });
       } catch (err: any) {
         if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
           throw err;
@@ -218,6 +351,13 @@ async function runPipeline(videoId: string, signal?: AbortSignal) {
 
     // ── Phase 4: Assembly & Publishing Delivery ─────────────────────────
     if (signal?.aborted) throw new Error("Job cancelled by user");
+    await writeCheckpoint(videoId, {
+      stage: "rendering",
+      script,
+      audioPaths,
+      footagePathsPerSection,
+      clips,
+    });
     await renderVideoAssembly(
       videoId,
       title,
@@ -381,16 +521,8 @@ async function runIncrementalPipeline(
         script,
         clips,
       });
-      const found = await findMultipleFootage(section, 2, videoId, usedIds, video.title);
-      const dlPaths: string[] = [];
-      for (let ci = 0; ci < found.length; ci++) {
-        try {
-          const p = await downloadClip(found[ci], videoId, `${section.id}_${ci}`);
-          dlPaths.push(p);
-        } catch (dlErr: any) {
-          console.warn(`[orchestrator] Re-render clip download failed (${section.id}_${ci}):`, dlErr?.message);
-        }
-      }
+      const found = await findMultipleFootage(section, 3, videoId, usedIds, video.title);
+      const dlPaths = await downloadFoundClips(found, videoId, section.id, signal);
       footagePathsPerSection[i] = dlPaths.length > 0 ? dlPaths : validExisting;
     } else {
       footagePathsPerSection[i] = validExisting;
@@ -488,6 +620,22 @@ function formatSourcesFile(title: string, sources: string[], clips: Clip[]): str
   return content;
 }
 
+// Optional zero-cost music slot: drop licensed MP3/WAV files into data/music.
+// The pipeline remains fully functional when the folder is absent or empty.
+async function findBackgroundMusic(theme: string, mood: string): Promise<string | null> {
+  const musicDir = path.resolve("data", "music");
+  const files = await fs.readdir(musicDir).catch(() => [] as string[]);
+  const audioFiles = files.filter((file) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(file));
+  if (audioFiles.length === 0) return null;
+
+  const preference = `${theme} ${mood}`.toLowerCase().split(/\s+/).filter(Boolean);
+  const ranked = audioFiles
+    .map((file) => ({ file, score: preference.reduce((score, word) => score + (file.toLowerCase().includes(word) ? 1 : 0), 0) }))
+    .sort((a, b) => b.score - a.score);
+
+  return path.join(musicDir, ranked[0].file);
+}
+
 // ─── Shared Assemble Step & YouTube Delivery Package ────────────────────────
 async function renderVideoAssembly(
   videoId: string,
@@ -514,13 +662,13 @@ async function renderVideoAssembly(
     renderProgress: 0,
   });
 
-  const outputDir = path.resolve("data", "videos", videoId);
+  const outputDir = getVideoOutputDir(videoId);
   await fs.mkdir(outputDir, { recursive: true });
 
-  const bgmPath = null;
+  const bgmPath = await findBackgroundMusic(theme, mood);
   const validAudioPaths: (string | null)[] = sections.map((_, i) => audioPaths[i] || null);
 
-  const { videoPath, thumbPath } = await assemble(
+  const { videoPath, thumbPath, thumbnailPaths, shortPath } = await assemble(
     videoId,
     title,
     sections,
@@ -570,6 +718,9 @@ async function renderVideoAssembly(
     title: script.title || title,
     description: script.description || "",
     thumbnail_hook: script.thumbnail_hook || "",
+    title_variants: script.title_variants || [],
+    thumbnail_variants: thumbnailPaths.map((p) => `/videos/${videoId}/${path.basename(p)}`),
+    short_video_url: shortPath ? `/videos/${videoId}/shorts.mp4` : null,
     tags: script.tags || ["documentary", "history"],
     durationSeconds: actualDuration,
     sources: script.sources || [],
@@ -597,13 +748,18 @@ async function renderVideoAssembly(
     renderProgress: 100,
     videoUrl,
     thumbnailUrl,
+    shortVideoUrl: shortPath ? `/videos/${videoId}/shorts.mp4` : undefined,
   });
 
   console.log(`✅ Video ${videoId} complete (${actualDuration}s): ${videoPath}`);
 
-  // Clean up temporary workspace directory for this job to free disk space
-  try {
-    const jobTmp = getTempDir(videoId);
-    await fs.rm(jobTmp, { recursive: true, force: true }).catch(() => {});
-  } catch {}
+  await writeCheckpoint(videoId, {
+    stage: "done",
+    script,
+    audioPaths: validAudioPaths,
+    footagePathsPerSection,
+    clips,
+  });
+
+  // Keep the checkpoint and downloaded media cache for selective re-renders.
 }

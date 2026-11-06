@@ -305,7 +305,9 @@ async function generateAssKaraoke(
 
     const words = section.narration.trim().split(/\s+/).filter(Boolean);
     if (words.length === 0) continue;
-    const charCounts = words.map((w) => Math.max(w.length, 1));
+    // Give punctuation a small timing cushion so pauses and sentence endings
+    // do not flash past the viewer before the voice lands on them.
+    const charCounts = words.map((w) => Math.max(w.length, 1) + (/[,.!?;:]$/.test(w) ? 4 : 0));
     const totalChars = charCounts.reduce((a, b) => a + b, 0);
     const wordDurs = charCounts.map((c) => (c / totalChars) * duration);
 
@@ -478,6 +480,8 @@ async function finalProductionMix(
   const hasBgm = bgmPath && (await fs.stat(bgmPath).catch(() => null))?.size;
   const hasAss = assPath && (await fs.stat(assPath).catch(() => null))?.size;
   const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
+  const caps = getFFmpegCapabilities();
+  const loudnessFilter = caps.hasLoudnorm ? ",loudnorm=I=-14:TP=-1.5:LRA=11" : "";
 
   const partOutput = outputPath + ".part.mp4";
   await fs.unlink(partOutput).catch(() => {});
@@ -490,14 +494,24 @@ async function finalProductionMix(
     if (hasBgm && bgmPath) {
       const fadeOutStart = Math.max(voDur - 2.5, 0);
       console.log(`[assembler] Mastering voiceover + background music (duration: ${voDur.toFixed(1)}s)...`);
+      const hasDucking = caps.filters.has("sidechaincompress");
+      const musicVolume = hasDucking ? "0.24" : "0.10";
+      const mixFilters = hasDucking
+        ? [
+          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musicVolume},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
+          `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+          `[bgm][vo]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[ducked]`,
+          `[vo][ducked]amix=inputs=2:duration=first:dropout_transition=2${loudnessFilter}[audio]`,
+        ]
+        : [
+          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musicVolume},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
+          `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+          `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2${loudnessFilter}[audio]`,
+        ];
       await ffmpeg([
         "-i", voiceoverPath,
         "-stream_loop", "-1", "-i", bgmPath,
-        "-filter_complex", [
-          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.10,afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
-          `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
-          `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2[audio]`,
-        ].join(";"),
+        "-filter_complex", mixFilters.join(";"),
         "-map", "[audio]",
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-t", voDur.toFixed(3),
@@ -507,6 +521,7 @@ async function finalProductionMix(
       console.log(`[assembler] Direct voiceover mastering (duration: ${voDur.toFixed(1)}s)...`);
       await ffmpeg([
         "-i", voiceoverPath,
+        ...(loudnessFilter ? ["-af", loudnessFilter.slice(1)] : []),
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-t", voDur.toFixed(3),
         "-y", masteredAudio,
@@ -516,6 +531,7 @@ async function finalProductionMix(
     console.warn(`[assembler] BGM audio mixing failed (${audioErr.message}). Falling back to direct voiceover...`);
     await ffmpeg([
       "-i", voiceoverPath,
+      ...(loudnessFilter ? ["-af", loudnessFilter.slice(1)] : []),
       "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
       "-t", voDur.toFixed(3),
       "-y", masteredAudio,
@@ -523,7 +539,6 @@ async function finalProductionMix(
   }
 
   // Step B: Final Production Mix
-  const caps = getFFmpegCapabilities();
   const canBurnAss = Boolean(caps.hasAss && hasAss && assPath);
 
   // Tier 1: Try burning ASS subtitles if supported by the active FFmpeg build
@@ -582,13 +597,43 @@ async function extractThumbnail(
 ): Promise<void> {
   const dur = await getExactDuration(videoPath);
   const seekSec = Math.min(3.0, Math.max(dur / 2, 0.5));
+  await extractThumbnailAt(videoPath, thumbPath, seekSec, options);
+}
+
+async function extractThumbnailAt(
+  videoPath: string,
+  thumbPath: string,
+  seekSec: number,
+  options?: { videoId?: string; signal?: AbortSignal }
+): Promise<void> {
   await ffmpeg([
-    "-ss", seekSec.toFixed(2),
+    "-ss", Math.max(0.5, seekSec).toFixed(2),
     "-i", videoPath,
     "-vframes", "1",
     "-vf", `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
     "-y", thumbPath,
   ], options);
+}
+
+async function createVerticalShort(
+  videoPath: string,
+  outputPath: string,
+  options?: { videoId?: string; signal?: AbortSignal }
+): Promise<void> {
+  const duration = await getExactDuration(videoPath);
+  if (duration < 8) return;
+  const shortDuration = Math.min(45, duration);
+  await ffmpeg([
+    "-ss", "0",
+    "-i", videoPath,
+    "-t", shortDuration.toFixed(3),
+    "-vf", "crop=608:1080:(iw-608)/2:0,scale=1080:1920:flags=lanczos,format=yuv420p",
+    "-r", String(FPS),
+    "-c:v", "libx264", "-crf", "21", "-preset", PRESET,
+    "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+    "-movflags", "+faststart",
+    "-y", outputPath,
+  ], { ...options, timeoutMs: 300000 });
 }
 
 // ─── Step Manifest ───────────────────────────────────────────────────────────
@@ -635,7 +680,7 @@ export async function assemble(
   onProgress: ProgressFn,
   theme?: string,
   signal?: AbortSignal
-): Promise<{ videoPath: string; thumbPath: string }> {
+): Promise<{ videoPath: string; thumbPath: string; thumbnailPaths: string[]; shortPath: string | null }> {
   const tmpDir = getTempDir(videoId);
   await fs.mkdir(tmpDir, { recursive: true });
   await fs.mkdir(outputDir, { recursive: true });
@@ -903,6 +948,26 @@ export async function assemble(
     }
   }
 
+  const thumbnailPaths = [thumbPath];
+  const finalDuration = await getExactDuration(finalMp4).catch(() => 0);
+  for (const [index, ratio] of [0.35, 0.7].entries()) {
+    const variantPath = path.join(outputDir, `thumb_${index + 2}.jpg`);
+    try {
+      await extractThumbnailAt(finalMp4, variantPath, Math.max(1, finalDuration * ratio), opts);
+      thumbnailPaths.push(variantPath);
+    } catch (variantErr: any) {
+      console.warn(`[assembler] Thumbnail variant ${index + 2} failed: ${variantErr.message}`);
+    }
+  }
+
+  const shortPath = path.join(outputDir, "shorts.mp4");
+  try {
+    await createVerticalShort(finalMp4, shortPath, opts);
+  } catch (shortErr: any) {
+    if (signal?.aborted) throw shortErr;
+    console.warn(`[assembler] Vertical Short generation failed: ${shortErr.message}`);
+  }
+
   // Rolling cleanup: remove cut files and intermediate timeline
   for (const cut of renderedCuts) {
     await fs.unlink(cut).catch(() => {});
@@ -914,5 +979,6 @@ export async function assemble(
   await fs.unlink(mergedAudio).catch(() => {});
   if (assExists) await fs.unlink(assPath).catch(() => {});
 
-  return { videoPath: finalMp4, thumbPath };
+  const shortExists = await fs.stat(shortPath).then((stat) => stat.size > 2000).catch(() => false);
+  return { videoPath: finalMp4, thumbPath, thumbnailPaths, shortPath: shortExists ? shortPath : null };
 }

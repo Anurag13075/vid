@@ -1,11 +1,9 @@
 import pg from "pg";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import { getDataDir } from "./pipeline/tempDir.js";
 
 const { Pool } = pg;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOCAL_DB_PATH = path.resolve(__dirname, "../data/db.json");
+const LOCAL_DB_PATH = getDataDir("db.json");
 
 let useLocalJson = !process.env.DATABASE_URL;
 let pool: pg.Pool | null = null;
@@ -47,6 +45,7 @@ interface VideoRecord {
   render_progress?: number;
   video_url?: string;
   thumbnail_url?: string;
+  short_video_url?: string;
   duration_seconds?: number;
   error_message?: string;
   created_at: string;
@@ -117,6 +116,7 @@ export async function initDb() {
         render_progress INTEGER DEFAULT 0,
         video_url TEXT,
         thumbnail_url TEXT,
+        short_video_url TEXT,
         duration_seconds INTEGER,
         error_message TEXT,
         created_at TIMESTAMP DEFAULT NOW(),
@@ -128,6 +128,7 @@ export async function initDb() {
       `ALTER TABLE videos ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'modern'`,
       `ALTER TABLE videos ADD COLUMN IF NOT EXISTS background TEXT DEFAULT 'gradient_dark'`,
       `ALTER TABLE videos ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'auto'`,
+      `ALTER TABLE videos ADD COLUMN IF NOT EXISTS short_video_url TEXT`,
     ];
     for (const sql of migrations) {
       await query(sql).catch(() => {});
@@ -225,7 +226,7 @@ export async function listVideos(): Promise<any[]> {
     );
   }
   const res = await query(
-    "SELECT id, title, stage, progress, message, video_url, thumbnail_url, duration_seconds, created_at FROM videos ORDER BY created_at DESC LIMIT 50"
+    "SELECT id, title, stage, progress, message, video_url, thumbnail_url, short_video_url, duration_seconds, created_at FROM videos ORDER BY created_at DESC LIMIT 50"
   );
   return res?.rows || [];
 }

@@ -240,6 +240,7 @@ router.get("/:id", async (req: Request, res: Response) => {
       renderProgress: video.render_progress,
       videoUrl: video.video_url,
       thumbnailUrl: video.thumbnail_url,
+      shortVideoUrl: video.short_video_url,
       durationSeconds: video.duration_seconds,
       errorMessage: video.error_message,
       createdAt: video.created_at,

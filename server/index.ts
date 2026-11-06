@@ -6,8 +6,10 @@ import path from "path";
 import fs from "fs";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
-import { initDb, getVideo } from "./db.js";
+import { initDb, getVideo, listVideos } from "./db.js";
 import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
+import { startPipeline } from "./pipeline/orchestrator.js";
+import { getDataDir } from "./pipeline/tempDir.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./pipeline/queue.js";
@@ -25,6 +27,7 @@ app.use(express.json({ limit: "10mb" }));
 app.get("/videos/:videoId/:filename", (req, res) => {
   const { videoId, filename } = req.params;
   const candidateDirs = [
+    path.join(getDataDir("videos"), videoId),
     path.join(__dirname, "../data/videos", videoId),
     path.join(process.cwd(), "data/videos", videoId),
     path.resolve("data", "videos", videoId),
@@ -70,7 +73,7 @@ app.get("/videos/:videoId/:filename", (req, res) => {
   });
 });
 
-app.use("/videos", express.static(path.join(__dirname, "../data/videos")));
+app.use("/videos", express.static(getDataDir("videos")));
 
 // REST endpoints
 app.use("/api/videos", videosRouter);
@@ -104,6 +107,7 @@ app.get("/api/pipeline/:id/status", async (req, res) => {
         renderSteps: video.render_steps,
         renderProgress: video.render_progress,
         videoUrl: video.video_url,
+        shortVideoUrl: video.short_video_url,
       });
     }
   } catch {}
@@ -160,6 +164,12 @@ async function main() {
   try {
     checkFFmpegCapabilities();
     await initDb();
+    const recoverableStages = new Set(["queued", "researching", "writing", "voiceover", "footage", "rendering"]);
+    const recoverableVideos = (await listVideos()).filter((video) => recoverableStages.has(video.stage));
+    for (const video of recoverableVideos) {
+      console.log(`[startup] Resuming interrupted VidRush job ${video.id} from ${video.stage}`);
+      startPipeline(video.id);
+    }
     app.listen(PORT, () => {
       console.log(`🚀 VidRush server running on http://localhost:${PORT} [${IS_PROD ? "production" : "development"}]`);
     });

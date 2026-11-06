@@ -59,6 +59,7 @@ export interface Job {
   renderProgress?: number | null;
   videoUrl?: string | null;
   thumbnailUrl?: string | null;
+  shortVideoUrl?: string | null;
   errorMessage?: string | null;
 }
 
