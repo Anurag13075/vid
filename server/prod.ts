@@ -179,9 +179,28 @@ async function main() {
   await initDb();
 
   const recoverableStages = new Set(["queued", "researching", "writing", "voiceover", "footage", "rendering"]);
-  const recoverableVideos = (await listVideos()).filter((video) => recoverableStages.has(video.stage));
-  for (const video of recoverableVideos) {
-    console.log(`[startup] Resuming interrupted VidRush job ${video.id} from ${video.stage}`);
+  const allVideos = await listVideos();
+  const now = Date.now();
+  const THIRTY_MINUTES_MS = 30 * 60 * 1000;
+
+  for (const video of allVideos) {
+    if (!recoverableStages.has(video.stage)) continue;
+    const createdAtMs = new Date(video.created_at || 0).getTime();
+    const ageMs = now - createdAtMs;
+
+    // Discard stale jobs older than 30 mins so they never block the queue
+    if (ageMs > THIRTY_MINUTES_MS) {
+      console.log(`[startup] Expiring stale job ${video.id} (stage: ${video.stage}, age: ${Math.round(ageMs / 60000)}m)`);
+      await updateVideo(video.id, {
+        stage: "error",
+        progress: 0,
+        message: "Job expired due to server restart. Please start a fresh generation.",
+        error_message: "Stale job expired on container boot",
+      }).catch(() => {});
+      continue;
+    }
+
+    console.log(`[startup] Resuming fresh job ${video.id} from ${video.stage} (age: ${Math.round(ageMs / 60000)}m)`);
     startPipeline(video.id);
   }
 
