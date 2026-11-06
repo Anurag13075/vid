@@ -11,9 +11,9 @@ const FPS = 30;
 const CRF = 21; // Pristine 1080p broadcast visual quality
 const PRESET = "veryfast"; // High-efficiency CABAC encoding (eliminates pixelation and macroblocking)
 const THREADS = Math.min(os.cpus()?.length || 2, 2);
-const CUT_TARGET_SEC = 10.0;
-const CUT_MIN_SEC = 6.0;
-const CUT_MAX_SEC = 16.0;
+const CUT_TARGET_SEC = 4.5;
+const CUT_MIN_SEC = 3.2;
+const CUT_MAX_SEC = 6.0;
 const FONT_CANDIDATES = [
     "C:/Windows/Fonts/arialbd.ttf",
     "C:/Windows/Fonts/arial.ttf",
@@ -165,10 +165,10 @@ async function makeDarkSceneClip(outPath, durationSec, options) {
     ], options);
 }
 // ─── Cut Slicer (Cinematic Documentary Pacing – 10-16s per shot) ─────────────
-function sliceCuts(audioDuration, numClips = 2) {
+function sliceCuts(audioDuration, numClips = 3) {
     if (audioDuration <= CUT_MAX_SEC)
         return [audioDuration];
-    const maxCutsForSection = Math.max(2, Math.min(Math.round(audioDuration / CUT_MIN_SEC), Math.max(numClips * 2, 4)));
+    const maxCutsForSection = Math.max(2, Math.round(audioDuration / CUT_MIN_SEC));
     const idealCount = Math.min(Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)), maxCutsForSection);
     const cutDur = audioDuration / idealCount;
     return new Array(idealCount).fill(cutDur);
@@ -224,7 +224,7 @@ async function generateAssKaraoke(sections, sectionTimings, audioPaths, assPath,
         }
     }
     // Word-by-Word Timed Karaoke Subtitles
-    const WORDS_PER_LINE = 4;
+    const WORDS_PER_LINE = 3;
     let timeOffset = 0;
     for (let i = 0; i < sections.length; i++) {
         const section = sections[i];
@@ -271,7 +271,7 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,48,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3,2,2,80,80,95,1
+Style: Default,DejaVu Sans,50,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.5,1.5,2,80,80,100,1
 Style: TitleBadge,DejaVu Sans,24,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,3,0,3,2,2,8,80,80,85,1
 Style: TitleCard,DejaVu Sans,44,${white},${white},${black},${shadowBox},1,0,0,0,100,100,1,0,3,3,3,8,80,80,135,1
 Style: StatCard,DejaVu Sans,38,${white},${white},${black},${cardBox},1,0,0,0,100,100,1,0,3,3,3,8,120,120,80,1

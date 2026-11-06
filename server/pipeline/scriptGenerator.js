@@ -151,10 +151,11 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
 - ACCURACY: Include real historical dates, official operations, names of key figures, geographical coordinates or locations, and verified facts. Do not invent facts.
 - RETENTION & PACING: Create tension, open loops between sections ("What the public wasn't told was far worse..."), and satisfying payoffs.
 - LENGTH: Each narration MUST be approximately ${wordsPerSection} to ${wordsPerSection + 15} words. Count carefully.
-- VISUAL KEYWORDS: Provide 3 SPECIFIC, highly searchable stock footage phrases:
-  * Structure: [Subject] + [Action] + [Environment/Era].
-  * Example for Bikini Atoll / nuclear test: "nuclear mushroom cloud explosion ocean", "naval military ships anchored tropical lagoon", "aerial view pacific coral atoll turquoise water".
-  * NEVER use vague words like "cinematic", "background", "dramatic". Use tangible visual objects.
+- VISUAL KEYWORDS: Provide exactly 3 DISTINCT, documentary-grade stock footage search terms per section:
+  1. Direct Subject/Action: Specific physical entities and operations (e.g. "semiconductor cleanroom silicon wafer", "naval battleship firing ocean").
+  2. Macro/Technical Detail: Close-up mechanical, blueprint, or tactile detail (e.g. "microchip circuit board gold wires macro", "radar scope sweep dark room").
+  3. Atmospheric/Aerial Establishing: Contextual environment or drone viewpoint (e.g. "aerial top down desert test site", "industrial data center server racks blue").
+  * STRICT NEGATIVES: NEVER use generic filler like "business person", "team meeting", "laptop desk", "concept", "abstract background", "cinematic". Use only concrete physical nouns.
 - Output ONLY the valid JSON array. No markdown fences, no preamble.`;
     const raw = await callGroq([
         {

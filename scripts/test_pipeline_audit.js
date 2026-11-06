@@ -92,11 +92,11 @@ async function runAudit() {
   console.log("\n[4/7] Testing Video Cut Slicer & Synchronization...");
   try {
     function sliceCuts(audioDuration, numClips = 2) {
-      const CUT_TARGET_SEC = 10.0;
-      const CUT_MIN_SEC = 6.0;
-      const CUT_MAX_SEC = 16.0;
+      const CUT_TARGET_SEC = 4.5;
+      const CUT_MIN_SEC = 3.2;
+      const CUT_MAX_SEC = 6.0;
       if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
-      const maxCutsForSection = Math.max(2, Math.min(Math.round(audioDuration / CUT_MIN_SEC), Math.max(numClips * 2, 4)));
+      const maxCutsForSection = Math.max(2, Math.round(audioDuration / CUT_MIN_SEC));
       const idealCount = Math.min(
         Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)),
         maxCutsForSection

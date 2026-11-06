@@ -4,7 +4,7 @@ import https from "https";
 import http from "http";
 import { createWriteStream } from "fs";
 import { getTempDir } from "./tempDir.js";
-const CLIPS_PER_SECTION = 2;
+const CLIPS_PER_SECTION = 3;
 export function createClipTracker() {
     return new Set();
 }
@@ -221,7 +221,7 @@ async function searchPexelsPhotos(keyword, needed, usedIds) {
 }
 export async function findMultipleFootage(section, limit, videoId, usedIds, title) {
     const clips = [];
-    const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 2);
+    const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 3);
     const cleanKeywords = section.visual_keywords
         .map(sanitizeKeyword)
         .filter(Boolean);
