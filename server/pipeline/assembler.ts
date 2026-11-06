@@ -130,21 +130,20 @@ function buildKenBurnsFilter(motion: MotionType, durationSec: number): string {
   const totalFrames = Math.max(Math.ceil(durationSec * FPS), 2);
   const denom = totalFrames - 1;
   const prog = `(min(n\\,${denom})/${denom})`;
-  const base = `scale=2112:1188:force_original_aspect_ratio=increase,crop=2112:1188`;
 
   switch (motion) {
     case "zoom-in":
-      return `${base},crop=w=2112-192*${prog}:h=1188-108*${prog}:x=96*${prog}:y=54*${prog},scale=1920:1080`;
+      return `scale=2112:1188:force_original_aspect_ratio=increase,crop=2112:1188,crop=w=2112-192*${prog}:h=1188-108*${prog}:x=96*${prog}:y=54*${prog},scale=1920:1080`;
     case "zoom-out":
-      return `${base},crop=w=1920+192*${prog}:h=1080+108*${prog}:x=96*(1-${prog}):y=54*(1-${prog}),scale=1920:1080`;
+      return `scale=2112:1188:force_original_aspect_ratio=increase,crop=2112:1188,crop=w=1920+192*${prog}:h=1080+108*${prog}:x=96*(1-${prog}):y=54*(1-${prog}),scale=1920:1080`;
     case "pan-right":
-      return `${base},crop=w=1920:h=1080:x=192*${prog}:y=54`;
+      return `scale=2112:1080:force_original_aspect_ratio=increase,crop=1920:1080:x=192*${prog}:y=0`;
     case "pan-left":
-      return `${base},crop=w=1920:h=1080:x=192*(1-${prog}):y=54`;
+      return `scale=2112:1080:force_original_aspect_ratio=increase,crop=1920:1080:x=192*(1-${prog}):y=0`;
     case "pan-down":
-      return `${base},crop=w=1920:h=1080:x=96:y=108*${prog}`;
+      return `scale=1920:1200:force_original_aspect_ratio=increase,crop=1920:1080:x=0:y=120*${prog}`;
     case "pan-up":
-      return `${base},crop=w=1920:h=1080:x=96:y=108*(1-${prog})`;
+      return `scale=1920:1200:force_original_aspect_ratio=increase,crop=1920:1080:x=0:y=120*(1-${prog})`;
   }
 }
 
@@ -174,7 +173,7 @@ async function renderCut(
 
   const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
   const inputArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
-  const cutOpts = { ...options, timeoutMs: 60000 };
+  const cutOpts = { ...options, timeoutMs: 120000 };
 
   await ffmpeg([
     ...inputArgs,
@@ -755,6 +754,7 @@ export async function assemble(
           try {
             await renderCut(fallbackClip, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
             renderedCuts.push(outPath);
+            completedCuts++;
             continue;
           } catch (e: any) {
             console.warn(`[assembler] Fallback clip render also failed: ${e.message}`);
@@ -762,6 +762,7 @@ export async function assemble(
         }
         await makeDarkSceneClip(outPath, durationSec, opts);
         renderedCuts.push(outPath);
+        completedCuts++;
         continue;
       }
 
@@ -798,6 +799,7 @@ export async function assemble(
           try {
             await renderCut(fallbackClip, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
             renderedCuts.push(outPath);
+            completedCuts++;
             continue;
           } catch {}
         }
