@@ -141,13 +141,15 @@ Output a JSON array of exactly ${count} section objects:
     "section_type": "${firstType}",
     "key_point": "Key statistic, date, or fact highlight",
     "chapter_title": ${isFirst ? '"CHAPTER 01 · THE HOOK"' : (startId % 4 === 1 ? '"ACT II · THE ESCALATION"' : 'null')},
-    "location_stamp": "📍 BERLIN · 1961",
+    "location_stamp": ${isFirst ? '"📍 [LOCATION] · [YEAR/DATE]"' : 'null'},
     "estimated_words": ${wordsPerSection},
     "sfx": false
   }
 ]
 
 DOCUMENTARY NARRATIVE RULES:
+- LOCATION BADGES: In 'location_stamp', if this section references a specific historical location, city, bunker, or date/year from the research pack, format a concise HUD badge like '📍 NORMANDY · JUNE 1944' or '📍 CAPE CANAVERAL · 1969'. If no specific location/date applies to this section, set location_stamp to null. NEVER invent locations not in the research.
+- CHAPTER TITLES: In 'chapter_title', provide a high-impact, topic-relevant act or chapter title for transition sections (like 'ACT I · THE INITIAL BREACH' or 'CHAPTER 02 · ESCALATION'), or null for standard middle scenes.
 ${isFirst ? `- Section ${startId} (COLD OPEN HOOK): Begin directly in media res with high stakes, a gripping sensory scene, or an unanswered paradox. NEVER say "In this video", "Welcome back", or "Today we look at". Hook the viewer immediately.` : ""}
 ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful philosophical resolution, lasting historical consequences, and an open reflection that leaves an impact.` : ""}
 - All middle sections: Use "broll" or "stat" (use "stat" whenever specific numbers, dates, megatons, population figures, or historical milestones are mentioned).
