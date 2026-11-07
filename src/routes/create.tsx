@@ -11,7 +11,7 @@ import { createJob } from "@/lib/pipeline";
 
 const searchSchema = z.object({
   topic: z.string().default(""),
-  length: z.enum(["short", "medium", "long"]).default("medium"),
+  length: z.enum(["short", "medium", "long", "extended"]).default("medium"),
   mode: z.enum(["auto", "manual"]).default("auto"),
 });
 

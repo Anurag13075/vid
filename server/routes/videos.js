@@ -195,7 +195,7 @@ router.post("/", async (req, res) => {
         const resolvedVoice = voiceAlias[voice] || voice;
         const validVoiceIds = VOICES.map((v) => v.id);
         const validVoice = validVoiceIds.includes(resolvedVoice) ? resolvedVoice : "deep_space_master";
-        const validLength = ["short", "medium", "long"].includes(length) ? length : "medium";
+        const validLength = ["short", "medium", "long", "extended"].includes(length) ? length : "medium";
         const validTheme = ["crime", "history", "modern", "minimalist", "standard"].includes(theme) ? theme : "modern";
         const validBackground = typeof background === "string" && background ? background : "gradient_dark";
         const validMode = ["auto", "manual"].includes(mode) ? mode : "auto";

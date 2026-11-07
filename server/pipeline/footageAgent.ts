@@ -114,7 +114,7 @@ async function searchPexels(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12_000);
+    const timer = setTimeout(() => controller.abort(), 25_000);
 
     const response = await fetch(
       `https://api.pexels.com/videos/search?query=${encodeURIComponent(keyword)}&per_page=30&orientation=landscape&min_duration=3&max_duration=25`,
@@ -179,7 +179,7 @@ async function searchPixabay(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12_000);
+    const timer = setTimeout(() => controller.abort(), 25_000);
 
     const response = await fetch(
       `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=20&video_type=film`,
@@ -235,7 +235,7 @@ async function searchPexelsPhotos(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12_000);
+    const timer = setTimeout(() => controller.abort(), 25_000);
 
     const response = await fetch(
       `https://api.pexels.com/v1/search?query=${encodeURIComponent(keyword)}&per_page=30&orientation=landscape`,

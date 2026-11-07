@@ -39,11 +39,13 @@ export async function resolveGroqModels(apiKey) {
 function targetSections(length) {
     switch (length) {
         case "short":
-            return { count: 12, label: "6-8 minutes", wordsPerSection: 105, totalWords: 1260 };
+            return { count: 12, label: "5-6 minutes", wordsPerSection: 100, totalWords: 1200 };
         case "long":
-            return { count: 22, label: "12-15 minutes", wordsPerSection: 115, totalWords: 2530 };
+            return { count: 20, label: "10-12 minutes", wordsPerSection: 110, totalWords: 2200 };
+        case "extended":
+            return { count: 26, label: "15-18 minutes", wordsPerSection: 110, totalWords: 2860 };
         default:
-            return { count: 16, label: "8-10 minutes", wordsPerSection: 110, totalWords: 1760 };
+            return { count: 16, label: "7-9 minutes", wordsPerSection: 105, totalWords: 1680 };
     }
 }
 function repairJson(raw, isArray = false) {
@@ -135,9 +137,11 @@ Output a JSON array of exactly ${count} section objects:
   {
     "id": ${startId},
     "narration": "Spoken documentary narration...",
-    "visual_keywords": ["specific subject action setting", "historical archival cue", "cinematic B-roll cue"],
+    "visual_keywords": ["cleanroom", "silicon wafer", "circuit board"],
     "section_type": "${firstType}",
     "key_point": "Key statistic, date, or fact highlight",
+    "chapter_title": ${isFirst ? '"CHAPTER 01 · THE HOOK"' : (startId % 4 === 1 ? '"ACT II · THE ESCALATION"' : 'null')},
+    "location_stamp": "📍 BERLIN · 1961",
     "estimated_words": ${wordsPerSection},
     "sfx": false
   }
@@ -174,6 +178,8 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
             ? sec.section_type
             : "broll",
         key_point: sec.key_point ? String(sec.key_point).slice(0, 75).trim() : null,
+        chapter_title: sec.chapter_title ? String(sec.chapter_title).slice(0, 60).trim() : null,
+        location_stamp: sec.location_stamp ? String(sec.location_stamp).slice(0, 50).trim() : null,
         estimated_words: Number(sec.estimated_words) || wordsPerSection,
         sfx: Boolean(sec.sfx),
     }));

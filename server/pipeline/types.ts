@@ -16,6 +16,8 @@ export interface ScriptSection {
   visual_keywords: string[];
   section_type: SectionType;
   key_point: string | null;
+  chapter_title?: string | null;
+  location_stamp?: string | null;
   estimated_words: number;
   sfx: boolean;
 }

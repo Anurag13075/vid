@@ -128,7 +128,11 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
         }
     }
     const gradeStr = caps.filters.has("eq") && gradeFilter ? `,${gradeFilter}` : "";
-    const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${transitionFilter},format=yuv420p`;
+    const vignetteFilter = caps.filters.has("vignette") ? ",vignette=PI/4.5" : "";
+    const letterboxFilter = caps.filters.has("drawbox")
+        ? ",drawbox=x=0:y=0:w=1920:h=48:color=black@1.0:t=fill,drawbox=x=0:y=1032:w=1920:h=48:color=black@1.0:t=fill"
+        : "";
+    const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
     const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
     const inputArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
     const cutOpts = { ...options, timeoutMs: 120000 };
@@ -212,6 +216,20 @@ async function generateAssKaraoke(sections, sectionTimings, audioPaths, assPath,
                     events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(300,300)}◆ ${escapeAss(t.keyPoint)}\n`;
                 }
             }
+            if (t.chapterTitle) {
+                const showStart = t.startSec + 0.1;
+                const showEnd = Math.min(t.startSec + 2.8, t.endSec - 0.2);
+                if (showEnd > showStart + 0.8) {
+                    events += `Dialogue: 3,${assTime(showStart)},${assTime(showEnd)},ChapterCard,,0,0,0,,{\\fad(400,400)}━ ${escapeAss(t.chapterTitle.toUpperCase())} ━\n`;
+                }
+            }
+            if (t.locationStamp) {
+                const showStart = t.startSec + 0.4;
+                const showEnd = Math.min(t.startSec + 4.8, t.endSec - 0.3);
+                if (showEnd > showStart + 1.0) {
+                    events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},LocationBadge,,0,0,0,,{\\fad(300,300)}${escapeAss(t.locationStamp)}\n`;
+                }
+            }
             if (t.sectionType === "intro" || t.sectionType === "outro") {
                 const isIntro = t.sectionType === "intro";
                 const showStart = isIntro ? Math.max(t.startSec + 4.5, 4.5) : t.startSec + 0.4;
@@ -271,11 +289,13 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,50,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.5,1.5,2,80,80,100,1
+Style: Default,DejaVu Sans,48,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.5,1.5,2,80,80,75,1
 Style: TitleBadge,DejaVu Sans,24,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,3,0,3,2,2,8,80,80,85,1
 Style: TitleCard,DejaVu Sans,44,${white},${white},${black},${shadowBox},1,0,0,0,100,100,1,0,3,3,3,8,80,80,135,1
 Style: StatCard,DejaVu Sans,38,${white},${white},${black},${cardBox},1,0,0,0,100,100,1,0,3,3,3,8,120,120,80,1
 Style: ChapterTag,DejaVu Sans,24,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,60,1
+Style: ChapterCard,DejaVu Sans,44,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,3,0,3,3,3,5,80,80,0,1
+Style: LocationBadge,DejaVu Sans,22,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,75,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -565,6 +585,8 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
             endSec: runningTime + dur,
             sectionType: sections[i].section_type,
             keyPoint: sections[i].key_point,
+            chapterTitle: sections[i].chapter_title || (i === 0 ? "PROLOGUE · THE UNTOLD STORY" : (i % 4 === 0 ? `ACT ${Math.floor(i / 4) + 1} · CRITICAL MOMENTUM` : null)),
+            locationStamp: sections[i].location_stamp || null,
         });
         runningTime += dur;
         const sectionClips = getSectionClips(i);
