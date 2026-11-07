@@ -5,7 +5,8 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { createVideo, getVideo, listVideos, updateVideo } from "../db.js";
 import { startPipeline, startIncrementalReRender, cancelVideoJob } from "../pipeline/orchestrator.js";
-import { VOICES } from "../pipeline/voiceover.js";
+import { VOICES, synthesizeVoicePreview } from "../pipeline/voiceover.js";
+import { getDataDir } from "../pipeline/tempDir.js";
 import { interpretVoiceCommand } from "../pipeline/commandInterpreter.js";
 import { jobQueue } from "../pipeline/queue.js";
 import { ffmpeg, getExactDuration } from "../pipeline/ffmpeg.js";
@@ -15,6 +16,20 @@ const router: ReturnType<typeof Router> = Router();
 // GET /api/videos/voices
 router.get("/voices", (_req: Request, res: Response) => {
   res.json(VOICES);
+});
+
+// GET /api/videos/voices/preview
+router.get("/voices/preview", async (req: Request, res: Response) => {
+  try {
+    const voiceId = (req.query.voice as string) || "presenter_male";
+    const text = (req.query.text as string) || "Hello, this is a documentary voice preview.";
+    const buffer = await synthesizeVoicePreview(voiceId, text);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Length", buffer.byteLength);
+    res.end(buffer);
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to generate preview: " + err.message });
+  }
 });
 
 // POST /api/videos/command — Interpret voice dictation & optionally execute
@@ -177,8 +192,29 @@ router.post("/", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "title is required" });
     }
 
+    const voiceAlias: Record<string, string> = {
+      brian: "presenter_male",
+      Brian: "presenter_male",
+      aria: "presenter_female",
+      Aria: "presenter_female",
+      christopher: "deep_space_master",
+      Christopher: "deep_space_master",
+      magnus: "deep_space_master",
+      Magnus: "deep_space_master",
+      guy: "newscast_male",
+      Guy: "newscast_male",
+      andrew: "casual_guy",
+      Andrew: "casual_guy",
+      eleanor: "wise_woman",
+      Eleanor: "wise_woman",
+      ava: "audiobook_female_1",
+      Ava: "audiobook_female_1",
+      george: "audiobook_male_1",
+      George: "audiobook_male_1",
+    };
+    const resolvedVoice = voiceAlias[voice] || voice;
     const validVoiceIds = VOICES.map((v) => v.id);
-    const validVoice = validVoiceIds.includes(voice) ? voice : "presenter_female";
+    const validVoice = validVoiceIds.includes(resolvedVoice) ? resolvedVoice : "deep_space_master";
     const validLength = ["short", "medium", "long"].includes(length) ? length : "medium";
     const validTheme = ["crime", "history", "modern", "minimalist", "standard"].includes(theme) ? theme : "modern";
     const validBackground = typeof background === "string" && background ? background : "gradient_dark";
@@ -329,6 +365,7 @@ router.get("/:id/compress-status", async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
     const candidateDirs = [
+      path.join(getDataDir("videos"), id),
       path.join(process.cwd(), "data", "videos", id),
       path.resolve("data", "videos", id),
     ];
@@ -383,6 +420,7 @@ router.get("/:id/download", async (req: Request, res: Response) => {
     const id = req.params.id as string;
     const isMaster = req.query.master === "1" || req.query.quality === "master" || req.query.full === "1";
     const candidateDirs = [
+      path.join(getDataDir("videos"), id),
       path.join(process.cwd(), "data", "videos", id),
       path.resolve("data", "videos", id),
     ];
@@ -409,6 +447,18 @@ router.get("/:id/download", async (req: Request, res: Response) => {
     if (isMaster) {
       const downloadName = `${cleanTitle}_1080p_Master.mp4`;
       return res.download(path.resolve(targetFile), downloadName);
+    }
+
+    const preCompressed = path.join(foundDir, "compressed.mp4");
+    if (fs.existsSync(preCompressed)) {
+      try {
+        const stat = await fs.promises.stat(preCompressed);
+        if (stat.size > 500 * 1024) {
+          const sizeMb = (stat.size / (1024 * 1024)).toFixed(1);
+          const downloadName = `${cleanTitle}_DataSaver_${sizeMb}MB.mp4`;
+          return res.download(path.resolve(preCompressed), downloadName);
+        }
+      } catch {}
     }
 
     let sendFile = targetFile;

@@ -1,4 +1,5 @@
 import { promises as fs } from "fs";
+import fsSync from "fs";
 import path from "path";
 import os from "os";
 import { spawn } from "child_process";
@@ -37,6 +38,19 @@ const EDGE_VOICE_MAP: Record<string, string> = {
   audiobook_female_2: "en-US-MichelleNeural",
   audiobook_male_2: "en-US-EricNeural",
   newscast_female: "en-US-AnaNeural",
+  // Common aliases
+  brian: "en-US-BrianNeural",
+  Brian: "en-US-BrianNeural",
+  christopher: "en-US-ChristopherNeural",
+  Christopher: "en-US-ChristopherNeural",
+  guy: "en-US-GuyNeural",
+  Guy: "en-US-GuyNeural",
+  aria: "en-US-AriaNeural",
+  Aria: "en-US-AriaNeural",
+  magnus: "en-US-ChristopherNeural",
+  Magnus: "en-US-ChristopherNeural",
+  andrew: "en-US-AndrewNeural",
+  Andrew: "en-US-AndrewNeural",
 };
 
 const MALE_VOICES = new Set([
@@ -46,6 +60,20 @@ const MALE_VOICES = new Set([
   "casual_guy",
   "deep_space_master",
   "audiobook_male_2",
+  "brian",
+  "Brian",
+  "christopher",
+  "Christopher",
+  "guy",
+  "Guy",
+  "andrew",
+  "Andrew",
+  "magnus",
+  "Magnus",
+  "eric",
+  "Eric",
+  "ryan",
+  "Ryan",
 ]);
 
 const DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"; // George (reliable narrator)
@@ -64,18 +92,42 @@ function cleanNarrationText(text: string): string {
     .trim();
 }
 
-// ─── Microsoft Edge Neural TTS ──────────────────────────────────────────────
+// ─── Microsoft Edge Neural TTS (Pure Node.js WebSocket + CLI Fallback) ──────
 async function generateEdgeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
   const edgeVoice = EDGE_VOICE_MAP[voiceId] || (MALE_VOICES.has(voiceId) ? "en-US-ChristopherNeural" : "en-US-AriaNeural");
+
+  // Attempt 1: Native pure Node.js msedge-tts client (zero Python/CLI dependency)
+  try {
+    const { MsEdgeTTS, OUTPUT_FORMAT } = await import("msedge-tts");
+    const tts = new MsEdgeTTS();
+    await tts.setMetadata(edgeVoice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+    const tmpDir = path.dirname(outputPath);
+    const subTmp = path.join(tmpDir, `edge_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+    await fs.mkdir(subTmp, { recursive: true });
+    const res = await tts.toFile(subTmp, text);
+    if (res?.audioFilePath && fsSync.existsSync(res.audioFilePath)) {
+      const stat = await fs.stat(res.audioFilePath);
+      if (stat.size > 500) {
+        await fs.copyFile(res.audioFilePath, outputPath);
+        await fs.rm(subTmp, { recursive: true, force: true }).catch(() => {});
+        return; // Success!
+      }
+    }
+    await fs.rm(subTmp, { recursive: true, force: true }).catch(() => {});
+  } catch (nodeErr: any) {
+    console.warn(`[tts] Native msedge-tts failed (${nodeErr.message}), trying CLI fallback...`);
+  }
+
+  // Attempt 2: CLI candidates (edge-tts Python binary if installed)
   const tempTextFile = outputPath + ".txt";
   await fs.writeFile(tempTextFile, text, "utf8");
 
   const candidates: { cmd: string; args: string[] }[] = [
-    { cmd: "edge-tts", args: ["--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
-    { cmd: "python3", args: ["-m", "edge_tts", "--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
-    { cmd: "/usr/local/bin/edge-tts", args: ["--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
-    { cmd: "/usr/bin/edge-tts", args: ["--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
-    { cmd: "python", args: ["-m", "edge_tts", "--voice", edgeVoice, "--rate=-2%", "-f", tempTextFile, "--write-media", outputPath] },
+    { cmd: "edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+    { cmd: "python3", args: ["-m", "edge_tts", "--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+    { cmd: "/usr/local/bin/edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+    { cmd: "/usr/bin/edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+    { cmd: "python", args: ["-m", "edge_tts", "--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
   ];
 
   let lastError: Error | null = null;
@@ -158,9 +210,9 @@ async function generateElevenLabsTTS(
   }
 }
 
-// ─── Clean Spoken TTS Fallback (Natural 1.0x Human Pacing) ─────────────────
+// ─── Clean Spoken TTS Fallback (with Male/Female Timbre Conditioning) ────────
 async function generateFreeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
-  // Split on sentence boundaries to ensure natural cadence and breathing pauses
+  const isMale = MALE_VOICES.has(voiceId);
   const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
   const chunks: string[] = [];
   let cur = "";
@@ -194,9 +246,14 @@ async function generateFreeTTS(text: string, voiceId: string, outputPath: string
   const tmpRaw = outputPath + ".raw.mp3";
   await fs.writeFile(tmpRaw, rawAudio);
 
-  // Normalize directly to standard 44.1kHz stereo MP3 at natural 1.0x human speaking speed
+  // If a male voice was chosen, down-pitch and formant-shift so it NEVER sounds like a female voice!
+  const audioFilters = isMale
+    ? "asetrate=44100*0.82,aresample=44100,atempo=1.22,bass=g=5:f=110,equalizer=f=2400:t=q:w=1:g=-2"
+    : "equalizer=f=3000:t=q:w=1:g=2,treble=g=2";
+
   await ffmpeg([
     "-i", tmpRaw,
+    "-af", audioFilters,
     "-ar", "44100",
     "-ac", "2",
     "-c:a", "libmp3lame",
@@ -279,6 +336,22 @@ export async function generateVoiceover(
   await generateSilence(audioPath, estimatedMs);
   const durationMs = await getAudioDurationMs(audioPath);
   return { audioPath, durationMs };
+}
+
+// Quick synthesis for the UI voice preview endpoint
+export async function synthesizeVoicePreview(voiceId: string, text: string): Promise<Buffer> {
+  const tmpDir = getTempDir("previews");
+  await fs.mkdir(tmpDir, { recursive: true });
+  const tmpOut = path.join(tmpDir, `preview_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`);
+  try {
+    await generateEdgeTTS(text, voiceId, tmpOut);
+    return await fs.readFile(tmpOut);
+  } catch {
+    await generateFreeTTS(text, voiceId, tmpOut);
+    return await fs.readFile(tmpOut);
+  } finally {
+    await fs.unlink(tmpOut).catch(() => {});
+  }
 }
 
 // Natural documentary narration pacing: ~140-150 words per minute (approx 2.4 words per second)

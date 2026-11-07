@@ -1,5 +1,6 @@
 import path from "path";
 import { promises as fs } from "fs";
+import fsSync from "fs";
 import { fileURLToPath } from "url";
 import { generateScript } from "./scriptGenerator.js";
 import { generateVoiceover, getTempDir } from "./voiceover.js";
@@ -7,7 +8,7 @@ import { createClipTracker, findMultipleFootage, downloadClip } from "./footageA
 import { assemble, RENDER_STEPS } from "./assembler.js";
 import { updateVideo, getVideo } from "../db.js";
 import { jobQueue } from "./queue.js";
-import { ffprobe, killProcessesForVideo } from "./ffmpeg.js";
+import { ffmpeg, ffprobe, killProcessesForVideo } from "./ffmpeg.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 async function emit(videoId, event) {
     jobQueue.emit(videoId, event);
@@ -458,6 +459,45 @@ async function renderVideoAssembly(videoId, title, sections, audioPaths, footage
     const sourcesText = formatSourcesFile(title, script.sources || [], clips);
     await fs.writeFile(path.join(outputDir, "sources.txt"), sourcesText, "utf8").catch(() => { });
     await fs.writeFile(path.join(outputDir, "sources.json"), JSON.stringify(script.sources || [], null, 2), "utf8").catch(() => { });
+
+    // ── Pre-generate Data-Saver (<50MB) 720p Mobile MP4 ───────────────────────
+    const compressedMp4Path = path.join(outputDir, "compressed.mp4");
+    try {
+        const dur = Math.max(actualDuration, 20);
+        const targetTotalBps = (42 * 1024 * 1024 * 8) / dur;
+        const audioKbps = 96;
+        const videoKbps = Math.min(1800, Math.max(220, Math.floor((targetTotalBps - audioKbps * 1000) / 1000)));
+
+        console.log(`[orchestrator] Pre-generating data-saver compressed video for ${videoId} (${videoKbps}k video)...`);
+        const tmpComp = path.join(outputDir, `compressed_tmp_${Date.now()}.mp4`);
+        await ffmpeg([
+            "-i", videoPath,
+            "-vf", "scale=-2:720",
+            "-c:v", "libx264",
+            "-b:v", `${videoKbps}k`,
+            "-maxrate", `${Math.floor(videoKbps * 1.35)}k`,
+            "-bufsize", `${Math.floor(videoKbps * 2)}k`,
+            "-preset", "veryfast",
+            "-threads", "2",
+            "-c:a", "aac",
+            "-b:a", `${audioKbps}k`,
+            "-ar", "44100",
+            "-movflags", "+faststart",
+            "-y", tmpComp,
+        ]);
+        if (fsSync.existsSync(tmpComp) && fsSync.statSync(tmpComp).size > 500 * 1024) {
+            await fs.rename(tmpComp, compressedMp4Path);
+            console.log(`[orchestrator] Pre-compressed data-saver video saved at ${compressedMp4Path}`);
+        } else {
+            await fs.unlink(tmpComp).catch(() => {});
+        }
+    } catch (compErr) {
+        console.warn(`[orchestrator] Pre-compression failed (${compErr.message}); on-demand download handler will generate when requested.`);
+    }
+
+    const existingVid = await getVideo(videoId);
+    const resolvedVoice = existingVid?.voice || "presenter_male";
+
     // 3. YouTube Publishing Metadata
     const metadata = {
         id: videoId,
@@ -468,7 +508,7 @@ async function renderVideoAssembly(videoId, title, sections, audioPaths, footage
         durationSeconds: actualDuration,
         sources: script.sources || [],
         theme: theme || "modern",
-        voice: videoId,
+        voice: resolvedVoice,
         createdAt: new Date().toISOString(),
     };
     await fs.writeFile(path.join(outputDir, "metadata.json"), JSON.stringify(metadata, null, 2), "utf8").catch(() => { });

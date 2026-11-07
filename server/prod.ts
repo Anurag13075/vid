@@ -15,6 +15,7 @@ import { jobQueue } from "./pipeline/queue.js";
 import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
 import { getDataDir } from "./pipeline/tempDir.js";
 import { startPipeline } from "./pipeline/orchestrator.js";
+import { VOICES, synthesizeVoicePreview } from "./pipeline/voiceover.js";
 import videosRouter from "./routes/videos.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +81,19 @@ app.use("/videos", express.static(getDataDir("videos")));
 
 // REST API
 app.use("/api/videos", videosRouter);
+app.get("/api/voices", (_req, res) => res.json(VOICES));
+app.get("/api/voices/preview", async (req, res) => {
+  try {
+    const voiceId = (req.query.voice as string) || "presenter_male";
+    const text = (req.query.text as string) || "Hello, this is a documentary voice preview.";
+    const buffer = await synthesizeVoicePreview(voiceId, text);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Length", buffer.byteLength);
+    res.end(buffer);
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to generate preview: " + err.message });
+  }
+});
 
 // SSE — real-time pipeline progress
 app.get("/api/pipeline/:id/status", async (req, res) => {

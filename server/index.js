@@ -7,6 +7,8 @@ import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { initDb, getVideo } from "./db.js";
 import { checkFFmpegCapabilities } from "./pipeline/ffmpeg.js";
+import { getDataDir } from "./pipeline/tempDir.js";
+import { VOICES, synthesizeVoicePreview } from "./pipeline/voiceover.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { jobQueue } from "./pipeline/queue.js";
 import videosRouter from "./routes/videos.js";
@@ -20,6 +22,7 @@ app.use(express.json({ limit: "10mb" }));
 app.get("/videos/:videoId/:filename", (req, res) => {
     const { videoId, filename } = req.params;
     const candidateDirs = [
+        path.join(getDataDir("videos"), videoId),
         path.join(__dirname, "../data/videos", videoId),
         path.join(process.cwd(), "data/videos", videoId),
         path.resolve("data", "videos", videoId),
@@ -62,9 +65,22 @@ app.get("/videos/:videoId/:filename", (req, res) => {
         },
     });
 });
-app.use("/videos", express.static(path.join(__dirname, "../data/videos")));
+app.use("/videos", express.static(getDataDir("videos")));
 // REST endpoints
 app.use("/api/videos", videosRouter);
+app.get("/api/voices", (_req, res) => res.json(VOICES));
+app.get("/api/voices/preview", async (req, res) => {
+    try {
+        const voiceId = req.query.voice || "presenter_male";
+        const text = req.query.text || "Hello, this is a documentary voice preview.";
+        const buffer = await synthesizeVoicePreview(voiceId, text);
+        res.setHeader("Content-Type", "audio/mpeg");
+        res.setHeader("Content-Length", buffer.byteLength);
+        res.end(buffer);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to generate preview: " + err.message });
+    }
+});
 // SSE: real-time pipeline status
 app.get("/api/pipeline/:id/status", async (req, res) => {
     const videoId = req.params.id;

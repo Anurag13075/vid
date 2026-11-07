@@ -11,3 +11,4 @@ export declare function generateVoiceover(section: ScriptSection, videoId: strin
     audioPath: string;
     durationMs: number;
 }>;
+export declare function synthesizeVoicePreview(voiceId: string, text: string): Promise<Buffer>;

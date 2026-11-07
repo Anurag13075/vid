@@ -364,12 +364,7 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
 - RETENTION & PACING: Create tension, open loops between sections ("What the public wasn't told was far worse..."), and satisfying payoffs.
 - LENGTH: Each narration MUST be approximately ${wordsPerSection} to ${wordsPerSection + 15} words. Count carefully.
 - JSON SAFETY: NEVER use double quote characters inside narration, key_point, or visual_keywords. For quoted speech or titles, use single quotes. Do not put line breaks inside string values.
-- VISUAL KEYWORDS: Provide exactly 5 DISTINCT, documentary-grade stock footage search terms per section:
-  1. Direct Subject/Action: Specific physical entities and operations (e.g. 'semiconductor cleanroom silicon wafer', 'naval battleship firing ocean').
-  2. Macro/Technical Detail: Close-up mechanical, blueprint, or tactile detail (e.g. 'microchip circuit board gold wires macro', 'radar scope sweep dark room').
-  3. Atmospheric/Aerial Establishing: Contextual environment or drone viewpoint (e.g. 'aerial top down desert test site', 'industrial data center server racks blue').
-  4. Archival/Documentary Evidence: A concrete document, photograph, map, artifact, or public-record visual (e.g. 'declassified document stamped secret', 'historical newspaper printing press').
-  5. Human-Scale Consequence: A specific person, place, or physical result affected by the topic (e.g. 'workers leaving factory gate', 'flooded village street evacuation').
+- VISUAL KEYWORDS: Provide 3 to 5 CONCISE, 1-3 word stock footage search terms per section (e.g. 'cleanroom', 'silicon wafer', 'circuit board', 'battleship'). STRICT RULE: Maximum 3 words per keyword, never write long sentences or descriptive paragraphs! Stock video engines return 0 hits for long phrases.
   * STRICT NEGATIVES: NEVER use generic filler like 'business person', 'team meeting', 'laptop desk', 'concept', 'abstract background', 'cinematic'. Use only concrete physical nouns.
 - Output ONLY the valid JSON object. No markdown fences, no preamble.`;
 

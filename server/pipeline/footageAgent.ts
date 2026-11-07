@@ -42,45 +42,62 @@ const STOP_WORDS = new Set([
   "the", "get", "rid", "but", "not", "can", "its", "are", "was", "has",
   "top", "best", "ways", "tips", "easy", "simple", "ultimate", "guide",
   "about", "some", "more", "very", "just", "been", "also", "over", "such",
+  "showing", "view", "shot", "shots", "scene", "scenes", "look", "looks",
+  "direct", "subject", "action", "macro", "detail", "establishing", "archival",
+  "human", "scale", "consequence", "broll", "b-roll", "footage", "video",
 ]);
 
-const BANNED_TERMS = [
+const BANNED_TERMS = new Set([
   "cinematic", "background", "footage", "dramatic", "visual",
   "scene", "abstract", "generic", "video", "clip", "broll", "b-roll",
-];
+]);
 
-function sanitizeKeyword(kw: string): string {
-  const lower = kw.toLowerCase().trim();
-  if (lower.length < 3) return "";
-  if (BANNED_TERMS.some((b) => lower === b)) return "";
-  return lower;
+export function sanitizeKeyword(raw: string): string {
+  if (!raw || typeof raw !== "string") return "";
+  let s = raw
+    .replace(/^[\d\.\s\-\:]+/, "")
+    .replace(/^[a-zA-Z\s\/\-_]+[\:\-]\s*/, "")
+    .replace(/[\(\)\[\]\"\'\:\;\,\.\/\\#]/g, " ")
+    .toLowerCase()
+    .trim();
+
+  const tokens = s
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w) && !BANNED_TERMS.has(w));
+
+  return tokens.slice(0, 3).join(" ");
 }
 
 function buildTopicFallbacks(title: string, section: ScriptSection): string[] {
   const words = title
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w) && !BANNED_TERMS.has(w));
 
-  const coreWords = words.slice(0, 3).join(" ");
   const fallbacks: string[] = [];
 
-  if (coreWords) {
-    fallbacks.push(coreWords);
-    fallbacks.push(`${coreWords} historical`);
-    fallbacks.push(`${coreWords} aerial`);
+  // 1. Two-word core topic (e.g. "ancient rome", "cold war", "semiconductor cleanroom")
+  if (words.length >= 2) {
+    fallbacks.push(words.slice(0, 2).join(" "));
   }
 
+  // 2. Three-word topic if available
+  if (words.length >= 3) {
+    fallbacks.push(words.slice(0, 3).join(" "));
+  }
+
+  // 3. Sanitized key point from the section
   if (section.key_point) {
-    const kpWords = section.key_point
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, "")
-      .split(/\s+/)
-      .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
-      .slice(0, 3)
-      .join(" ");
-    if (kpWords.length > 3) fallbacks.push(kpWords);
+    const kpClean = sanitizeKeyword(section.key_point);
+    if (kpClean && !fallbacks.includes(kpClean)) {
+      fallbacks.push(kpClean);
+    }
+  }
+
+  // 4. Primary noun from title
+  if (words[0] && words[0].length >= 4 && !fallbacks.includes(words[0])) {
+    fallbacks.push(words[0]);
   }
 
   return fallbacks.filter(Boolean);
@@ -138,16 +155,14 @@ async function searchPexels(
         videoUrl,
         source: "pexels",
         externalId: idStr,
-        duration: video.duration || 8,
+        duration: video.duration || 10,
         license: "Pexels License (Free to use)",
         sourceUrl: video.url || `https://www.pexels.com/video/${video.id}/`,
         status: "pending",
       });
     }
   } catch (err: any) {
-    if (err?.name !== "AbortError") {
-      console.warn(`[pexels] search error for "${keyword}":`, err.message);
-    }
+    console.warn(`[pexels] Error querying "${keyword}":`, err.message);
   }
 
   return clips;
@@ -167,7 +182,7 @@ async function searchPixabay(
     const timer = setTimeout(() => controller.abort(), 12_000);
 
     const response = await fetch(
-      `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=30&video_type=all&orientation=horizontal&min_duration=3&max_duration=25`,
+      `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(keyword)}&per_page=20&video_type=film`,
       { signal: controller.signal }
     );
     clearTimeout(timer);
@@ -178,7 +193,9 @@ async function searchPixabay(
     }
 
     const data = (await response.json()) as any;
-    for (const hit of data.hits || []) {
+    const hits = (data.hits || []).filter((h: any) => !usedIds.has(`pixabay_${h.id}`));
+
+    for (const hit of hits) {
       if (clips.length >= needed) break;
       const idStr = `pixabay_${hit.id}`;
       if (usedIds.has(idStr)) continue;
@@ -190,20 +207,18 @@ async function searchPixabay(
       clips.push({
         id: hit.id,
         keyword,
-        thumbUrl: hit.videos?.medium?.thumbnail || hit.picture_id || "",
+        thumbUrl: hit.userImageURL || hit.videos?.tiny?.thumbnail || "",
         videoUrl,
         source: "pixabay",
         externalId: idStr,
-        duration: hit.duration || 8,
-        license: "Pixabay Content License (Free for commercial use)",
+        duration: hit.duration || 10,
+        license: "Pixabay License (Free to use)",
         sourceUrl: hit.pageURL || `https://pixabay.com/videos/id-${hit.id}/`,
         status: "pending",
       });
     }
   } catch (err: any) {
-    if (err?.name !== "AbortError") {
-      console.warn(`[pixabay] search error for "${keyword}":`, err.message);
-    }
+    console.warn(`[pixabay] Error querying "${keyword}":`, err.message);
   }
 
   return clips;
@@ -273,24 +288,25 @@ export async function findMultipleFootage(
   const clips: Clip[] = [];
   const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 3);
 
-  const cleanKeywords = section.visual_keywords
+  const cleanKeywords = (section.visual_keywords || [])
     .map(sanitizeKeyword)
     .filter(Boolean);
 
-  // Three targeted searches are enough for a scene and keep free-plan API usage bounded.
-  const keywordsToTry = (cleanKeywords.length > 0
+  const initialKeywords = cleanKeywords.length > 0
     ? cleanKeywords
-    : [section.key_point?.toLowerCase().slice(0, 40) || title.toLowerCase().slice(0, 40)]
-  ).slice(0, 3);
+    : [sanitizeKeyword(section.key_point || "") || sanitizeKeyword(title)];
 
-  // Phase 1: Pexels Videos API
+  const keywordsToTry = Array.from(new Set(initialKeywords.filter(Boolean))).slice(0, 3);
+  const topicFallbacks = buildTopicFallbacks(title, section);
+
+  // Phase 1: Pexels Videos API with direct scene keywords
   for (const keyword of keywordsToTry) {
     if (clips.length >= clipsNeeded) break;
     const found = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
     clips.push(...found);
   }
 
-  // Phase 2: Pixabay Videos API
+  // Phase 2: Pixabay Videos API with direct scene keywords
   if (clips.length < clipsNeeded) {
     for (const keyword of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
@@ -299,21 +315,7 @@ export async function findMultipleFootage(
     }
   }
 
-  // Phase 3: Broad topic-derived fallback searches
-  if (clips.length < clipsNeeded) {
-    const topicFallbacks = buildTopicFallbacks(title, section).slice(0, 1);
-    for (const keyword of topicFallbacks) {
-      if (clips.length >= clipsNeeded) break;
-      const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
-      clips.push(...pexelsFound);
-      if (clips.length < clipsNeeded) {
-        const pixabayFound = await searchPixabay(keyword, clipsNeeded - clips.length, usedIds);
-        clips.push(...pixabayFound);
-      }
-    }
-  }
-
-  // Phase 4: High-Res Pexels Photos with Ken Burns Pan/Zoom Animation
+  // Phase 3: High-Res Pexels Photos for the scene keyword (rendered with dynamic Ken Burns)
   if (clips.length < clipsNeeded) {
     for (const keyword of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
@@ -322,7 +324,24 @@ export async function findMultipleFootage(
     }
   }
 
-  console.log(`[footage] Section ${section.id} ("${keywordsToTry[0]}"): ${clips.length}/${clipsNeeded} clips found`);
+  // Phase 4: Topic-Anchored Searches (searches core documentary topic rather than generic filler)
+  if (clips.length < clipsNeeded) {
+    for (const keyword of topicFallbacks) {
+      if (clips.length >= clipsNeeded) break;
+      const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
+      clips.push(...pexelsFound);
+      if (clips.length < clipsNeeded) {
+        const pixabayFound = await searchPixabay(keyword, clipsNeeded - clips.length, usedIds);
+        clips.push(...pixabayFound);
+      }
+      if (clips.length < clipsNeeded) {
+        const photosFound = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
+        clips.push(...photosFound);
+      }
+    }
+  }
+
+  console.log(`[footage] Section ${section.id} ("${keywordsToTry[0] || title}"): ${clips.length}/${clipsNeeded} clips found`);
   return clips;
 }
 
