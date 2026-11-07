@@ -10,9 +10,9 @@ import { Logo } from '../components/Logo'
 import { createJob } from "@/lib/pipeline";
 
 const searchSchema = z.object({
-  topic: z.string().default(""),
-  length: z.enum(["short", "medium", "long", "extended"]).default("medium"),
-  mode: z.enum(["auto", "manual"]).default("auto"),
+  topic: z.string().catch("").default(""),
+  length: z.enum(["short", "medium", "long", "extended"]).catch("extended").default("medium"),
+  mode: z.enum(["auto", "manual"]).catch("auto").default("auto"),
 });
 
 export const Route = createFileRoute("/create")({
