@@ -291,6 +291,7 @@ async function generateAssKaraoke(
         const showEnd = Math.min(t.startSec + 2.8, t.endSec - 0.2);
         if (showEnd > showStart + 0.8) {
           events += `Dialogue: 3,${assTime(showStart)},${assTime(showEnd)},ChapterCard,,0,0,0,,{\\fad(400,400)}━ ${escapeAss(t.chapterTitle.toUpperCase())} ━\n`;
+          events += `Dialogue: 1,${assTime(showStart + 0.2)},${assTime(Math.min(showStart + 4.5, t.endSec))},DossierTag,,0,0,0,,{\\fad(400,400)}[ CASE ARCHIVE // FORENSIC RECON ]\n`;
         }
       }
       if (t.locationStamp) {
@@ -376,6 +377,7 @@ Style: StatCard,DejaVu Sans,38,${white},${white},${black},${cardBox},1,0,0,0,100
 Style: ChapterTag,DejaVu Sans,24,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,60,1
 Style: ChapterCard,DejaVu Sans,44,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,3,0,3,3,3,5,80,80,0,1
 Style: LocationBadge,DejaVu Sans,22,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,75,1
+Style: DossierTag,DejaVu Sans,18,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,1.5,1.5,9,80,80,75,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

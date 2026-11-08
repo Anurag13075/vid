@@ -336,8 +336,9 @@ async function generateSectionBatch(
 ): Promise<ScriptSection[]> {
   const firstType = isFirst ? "intro" : "broll";
 
-  const prompt = `You are a world-class documentary director and investigative journalist (in the style of Vox, Wendover Productions, and Frontline).
-Write sections ${startId} to ${startId + count - 1} of a comprehensive, publish-ready documentary script about: "${title}".
+  const prompt = `You are an elite, award-winning documentary director and investigative screenwriter (in the style of MagnatesMedia, Vox, LEMMiNO, and Frontline).
+Write sections ${startId} to ${startId + count - 1} of a cinema-grade, binge-worthy documentary script about: "${title}".
+Treat the viewer like an intelligent adult watching a high-stakes thriller. Build genuine suspense, uncover the hidden mechanisms, and expose the human cost.
 
 RESEARCH PACK — treat this as the factual ground truth. Use only facts supported here; if a detail is not present, explain it without inventing precision:
 ${researchContext}
