@@ -413,6 +413,19 @@ function formatSourcesFile(title, sources, clips) {
     }
     return content;
 }
+
+async function findBackgroundMusic(theme, mood) {
+    const musicDir = path.resolve("data", "music");
+    const files = await fs.readdir(musicDir).catch(() => []);
+    const audioFiles = files.filter((file) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(file) && !file.includes("impact"));
+    if (audioFiles.length === 0) return null;
+    const preference = `${theme || "modern"} ${mood || "dramatic"}`.toLowerCase().split(/\s+/).filter(Boolean);
+    const ranked = audioFiles
+        .map((file) => ({ file, score: preference.reduce((score, word) => score + (file.toLowerCase().includes(word) ? 1 : 0), 0) }))
+        .sort((a, b) => b.score - a.score);
+    return path.join(musicDir, ranked[0].file);
+}
+
 // ─── Shared Assemble Step & YouTube Delivery Package ────────────────────────
 async function renderVideoAssembly(videoId, title, sections, audioPaths, footagePathsPerSection, theme, mood, clips, script, signal) {
     if (signal?.aborted)
@@ -429,7 +442,7 @@ async function renderVideoAssembly(videoId, title, sections, audioPaths, footage
     });
     const outputDir = path.resolve("data", "videos", videoId);
     await fs.mkdir(outputDir, { recursive: true });
-    const bgmPath = null;
+    const bgmPath = await findBackgroundMusic(theme, mood);
     const validAudioPaths = sections.map((_, i) => audioPaths[i] || null);
     const { videoPath, thumbPath } = await assemble(videoId, title, sections, validAudioPaths, footagePathsPerSection, bgmPath, outputDir, async (step, total, label) => {
         if (signal?.aborted)

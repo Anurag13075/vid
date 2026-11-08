@@ -153,11 +153,13 @@ DOCUMENTARY NARRATIVE RULES:
 ${isFirst ? `- Section ${startId} (COLD OPEN HOOK): Begin directly in media res with high stakes, a gripping sensory scene, or an unanswered paradox. NEVER say "In this video", "Welcome back", or "Today we look at". Hook the viewer immediately.` : ""}
 ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful philosophical resolution, lasting historical consequences, and an open reflection that leaves an impact.` : ""}
 - All middle sections: Use "broll" or "stat" (use "stat" whenever specific numbers, dates, megatons, population figures, or historical milestones are mentioned).
-- WRITING STYLE: Short spoken sentences (8 to 18 words). Conversational cadence, rhythm, dramatic pauses. Written specifically for natural voiceover narration.
+- DOCUMENTARY STORYTELLING (MAGNATESMEDIA / VOX): Write with high narrative tension, visceral sensory scenes, human conflict, and mysterious pacing. NEVER sound like a textbook, corporate explainer, or Wikipedia.
+  * BANNED PHRASES: NEVER use academic filler like "In this video", "Moreover", "Furthermore", "In conclusion", "As we can see", "Let's explore", or "It is crucial to note".
+  * SENSORY PACING: Open scenes with physical environments and actions (e.g. "Behind the soundproof doors of Room 402...", "At 3:14 AM, the radar went dead..."). End scenes with unanswered questions that build suspense.
 - ACCURACY: Include real historical dates, official operations, names of key figures, geographical coordinates or locations, and verified facts. Do not invent facts.
 - RETENTION & PACING: Create tension, open loops between sections ("What the public wasn't told was far worse..."), and satisfying payoffs.
 - LENGTH: Each narration MUST be approximately ${wordsPerSection} to ${wordsPerSection + 15} words. Count carefully.
-- VISUAL KEYWORDS: Provide 3 to 5 CONCISE, 1-3 word stock footage search terms per section (e.g. "cleanroom", "silicon wafer", "circuit board", "battleship"). STRICT RULE: Maximum 3 words per keyword, never write long sentences or descriptive paragraphs! Stock video engines return 0 hits for long phrases.
+- VISUAL KEYWORDS: Provide 3 to 5 CONCISE, 1-3 word stock footage search terms per section (e.g. "cleanroom", "silicon wafer", "circuit board", "battleship"). STRICT RULE: Maximum 3 words per keyword. Use ONLY concrete physical nouns, macro details, and specific environments (e.g. 'cleanroom', 'circuit board', 'microscope lens', 'vault door', 'submarine sonar', 'radar display'). NEVER use abstract concepts like 'technology', 'success', 'concept', 'disruption', or 'future'.
   * STRICT NEGATIVES: NEVER use generic filler like "business person", "team meeting", "laptop desk", "concept", "abstract background", "cinematic". Use only concrete physical nouns.
 - Output ONLY the valid JSON array. No markdown fences, no preamble.`;
     const raw = await callGroq([

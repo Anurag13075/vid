@@ -11,9 +11,9 @@ const FPS = 30;
 const CRF = 21; // Pristine 1080p broadcast visual quality
 const PRESET = "veryfast"; // High-efficiency CABAC encoding (eliminates pixelation and macroblocking)
 const THREADS = Math.min(os.cpus()?.length || 2, 2);
-const CUT_TARGET_SEC = 4.5;
-const CUT_MIN_SEC = 3.2;
-const CUT_MAX_SEC = 6.0;
+const CUT_TARGET_SEC = 3.4;
+const CUT_MIN_SEC = 2.4;
+const CUT_MAX_SEC = 4.0;
 const FONT_CANDIDATES = [
     "C:/Windows/Fonts/arialbd.ttf",
     "C:/Windows/Fonts/arial.ttf",
@@ -39,23 +39,23 @@ const MOTION_CYCLE = [
 ];
 const THEME_CONFIGS = {
     crime: {
-        gradeFilter: "eq=contrast=1.18:brightness=-0.04:saturation=0.88",
+    gradeFilter: "eq=contrast=1.18:brightness=-0.04:saturation=0.82",
         captionAccent: "#ef4444",
     },
     history: {
-        gradeFilter: "eq=contrast=1.10:brightness=0.01:saturation=0.82",
+    gradeFilter: "eq=contrast=1.12:brightness=-0.02:saturation=0.80",
         captionAccent: "#eab308",
     },
     modern: {
-        gradeFilter: "eq=contrast=1.12:brightness=0.02:saturation=1.20",
+    gradeFilter: "eq=contrast=1.14:brightness=-0.03:saturation=0.85",
         captionAccent: "#8b5cf6",
     },
     minimalist: {
-        gradeFilter: "eq=contrast=1.06:brightness=0.01:saturation=0.98",
+    gradeFilter: "eq=contrast=1.08:brightness=-0.01:saturation=0.88",
         captionAccent: "#38bdf8",
     },
     standard: {
-        gradeFilter: "eq=contrast=1.10:brightness=0.02:saturation=1.15",
+    gradeFilter: "eq=contrast=1.12:brightness=-0.02:saturation=0.85",
         captionAccent: "#22c55e",
     },
 };
@@ -128,11 +128,12 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
         }
     }
     const gradeStr = caps.filters.has("eq") && gradeFilter ? `,${gradeFilter}` : "";
-    const vignetteFilter = caps.filters.has("vignette") ? ",vignette=PI/4.5" : "";
+    const grainFilter = caps.filters.has("noise") ? ",noise=alls=8:allf=t+u" : "";
+  const vignetteFilter = caps.filters.has("vignette") ? ",vignette=PI/4.5" : "";
     const letterboxFilter = caps.filters.has("drawbox")
         ? ",drawbox=x=0:y=0:w=1920:h=48:color=black@1.0:t=fill,drawbox=x=0:y=1032:w=1920:h=48:color=black@1.0:t=fill"
         : "";
-    const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
+    const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${grainFilter}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
     const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
     const inputArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
     const cutOpts = { ...options, timeoutMs: 120000 };

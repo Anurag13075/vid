@@ -645,7 +645,7 @@ function formatSourcesFile(title: string, sources: string[], clips: Clip[]): str
 async function findBackgroundMusic(theme: string, mood: string): Promise<string | null> {
   const musicDir = path.resolve("data", "music");
   const files = await fs.readdir(musicDir).catch(() => [] as string[]);
-  const audioFiles = files.filter((file) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(file));
+  const audioFiles = files.filter((file) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(file) && !file.includes('impact'));
   if (audioFiles.length === 0) return null;
 
   const preference = `${theme} ${mood}`.toLowerCase().split(/\s+/).filter(Boolean);
