@@ -88,6 +88,10 @@ interface SectionTiming {
   keyPoint: string | null;
   chapterTitle?: string | null;
   locationStamp?: string | null;
+  statNumber?: string | null;
+  statLabel?: string | null;
+  documentHeadline?: string | null;
+  highlightedQuote?: string | null;
 }
 
 // ─── ASS SubStation Alpha Helpers ───────────────────────────────────────────
@@ -174,7 +178,7 @@ async function renderCut(
   const grainFilter = caps.filters.has("noise") ? ",noise=alls=8:allf=t+u" : "";
   const vignetteFilter = caps.filters.has("vignette") ? ",vignette=PI/4.5" : "";
   const letterboxFilter = caps.filters.has("drawbox")
-    ? ",drawbox=x=0:y=0:w=1920:h=48:color=black@1.0:t=fill,drawbox=x=0:y=1032:w=1920:h=48:color=black@1.0:t=fill"
+    ? ",drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill"
     : "";
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${grainFilter}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
 
@@ -198,6 +202,23 @@ async function renderCut(
 }
 
 // ─── Dark Gradient Scene Fallback ────────────────────────────────────────────
+
+async function makeEditorialGraphicClip(outPath, durationSec, options) {
+  const caps = getFFmpegCapabilities();
+  const filter = "color=c=0x0a0a0f:size=1920x1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4.5,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p";
+  await ffmpeg([
+    "-f", "lavfi",
+    "-i", filter,
+    "-t", durationSec.toFixed(3),
+    "-r", String(FPS),
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-pix_fmt", "yuv420p",
+    "-g", "30", "-keyint_min", "30",
+    "-video_track_timescale", "30000",
+    "-an", "-y", outPath,
+  ], options);
+}
+
 async function makeDarkSceneClip(
   outPath: string,
   durationSec: number,
@@ -279,11 +300,23 @@ async function generateAssKaraoke(
     for (const t of sectionTimings) {
       const dur = t.endSec - t.startSec;
       if (dur < 1.2) continue;
-      if ((t.sectionType === "stat" || t.keyPoint) && t.keyPoint) {
-        const showStart = t.startSec + 0.8;
-        const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.4);
+      if (t.statNumber || ((t.sectionType === "stat" || t.keyPoint) && t.keyPoint)) {
+        const showStart = t.startSec + 0.6;
+        const showEnd = Math.min(t.startSec + 4.8, t.endSec - 0.3);
         if (showEnd > showStart + 1.0) {
-          events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(300,300)}◆ ${escapeAss(t.keyPoint)}\n`;
+          if (t.statNumber) {
+            const sub = t.statLabel || t.keyPoint || "";
+            events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(200,200)}◆ ${escapeAss(t.statNumber)}${sub ? `\\N{\\fs22\\c&HCCCCCC&}${escapeAss(sub)}` : ""}\n`;
+          } else {
+            events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(200,200)}◆ ${escapeAss(t.keyPoint)}\n`;
+          }
+        }
+      }
+      if (t.documentHeadline) {
+        const showStart = t.startSec + 0.5;
+        const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.3);
+        if (showEnd > showStart + 1.0) {
+          events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(200,200)}[ ${escapeAss(t.documentHeadline.toUpperCase())} ]${t.highlightedQuote ? `\\N{\\fs24\\c&HFFFFFF&}"${escapeAss(t.highlightedQuote)}"` : ""}\n`;
         }
       }
       if (t.chapterTitle) {
@@ -370,14 +403,14 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,48,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.5,1.5,2,80,80,75,1
+Style: Default,DejaVu Sans,44,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.2,1.2,2,100,100,150,1
 Style: TitleBadge,DejaVu Sans,24,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,3,0,3,2,2,8,80,80,85,1
 Style: TitleCard,DejaVu Sans,44,${white},${white},${black},${shadowBox},1,0,0,0,100,100,1,0,3,3,3,8,80,80,135,1
 Style: StatCard,DejaVu Sans,38,${white},${white},${black},${cardBox},1,0,0,0,100,100,1,0,3,3,3,8,120,120,80,1
 Style: ChapterTag,DejaVu Sans,24,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,60,1
 Style: ChapterCard,DejaVu Sans,44,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,3,0,3,3,3,5,80,80,0,1
-Style: LocationBadge,DejaVu Sans,22,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,75,1
-Style: DossierTag,DejaVu Sans,18,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,1.5,1.5,9,80,80,75,1
+Style: LocationBadge,DejaVu Sans,22,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,2,2,7,100,100,145,1
+Style: DossierTag,DejaVu Sans,18,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,1.5,1.5,9,100,100,145,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -509,7 +542,9 @@ async function finalProductionMix(
   const hasAss = assPath && (await fs.stat(assPath).catch(() => null))?.size;
   const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
   const caps = getFFmpegCapabilities();
-  const loudnessFilter = caps.hasLoudnorm ? ",loudnorm=I=-14:TP=-1.5:LRA=11" : "";
+  const broadcastVoiceChain = caps.hasLoudnorm
+    ? ",highpass=f=80,equalizer=f=3000:t=q:w=1.2:g=2.2,acompressor=threshold=-18dB:ratio=3.5:attack=5:release=60,loudnorm=I=-14:TP=-1.5:LRA=11"
+    : ",highpass=f=80,equalizer=f=3000:t=q:w=1.2:g=2.2";
 
   const partOutput = outputPath + ".part.mp4";
   await fs.unlink(partOutput).catch(() => {});
@@ -529,12 +564,12 @@ async function finalProductionMix(
           `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musicVolume},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
           `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
           `[bgm][vo]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[ducked]`,
-          `[vo][ducked]amix=inputs=2:duration=first:dropout_transition=2${loudnessFilter}[audio]`,
+          `[vo][ducked]amix=inputs=2:duration=first:dropout_transition=2${broadcastVoiceChain}[audio]`,
         ]
         : [
           `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musicVolume},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
           `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
-          `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2${loudnessFilter}[audio]`,
+          `[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2${broadcastVoiceChain}[audio]`,
         ];
       await ffmpeg([
         "-i", voiceoverPath,
@@ -549,7 +584,7 @@ async function finalProductionMix(
       console.log(`[assembler] Direct voiceover mastering (duration: ${voDur.toFixed(1)}s)...`);
       await ffmpeg([
         "-i", voiceoverPath,
-        ...(loudnessFilter ? ["-af", loudnessFilter.slice(1)] : []),
+        ...(broadcastVoiceChain ? ["-af", broadcastVoiceChain.slice(1)] : []),
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-t", voDur.toFixed(3),
         "-y", masteredAudio,
@@ -559,7 +594,7 @@ async function finalProductionMix(
     console.warn(`[assembler] BGM audio mixing failed (${audioErr.message}). Falling back to direct voiceover...`);
     await ffmpeg([
       "-i", voiceoverPath,
-      ...(loudnessFilter ? ["-af", loudnessFilter.slice(1)] : []),
+      ...(broadcastVoiceChain ? ["-af", broadcastVoiceChain.slice(1)] : []),
       "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
       "-t", voDur.toFixed(3),
       "-y", masteredAudio,
@@ -779,6 +814,10 @@ export async function assemble(
       keyPoint: sections[i].key_point,
       chapterTitle: sections[i].chapter_title || (i === 0 ? "PROLOGUE · THE UNTOLD STORY" : (i % 4 === 0 ? `ACT ${Math.floor(i / 4) + 1} · CRITICAL MOMENTUM` : null)),
       locationStamp: sections[i].location_stamp || null,
+      statNumber: sections[i].stat_number || null,
+      statLabel: sections[i].stat_label || null,
+      documentHeadline: sections[i].document_headline || null,
+      highlightedQuote: sections[i].highlighted_quote || null,
     });
     runningTime += totalSlot;
 
@@ -823,6 +862,12 @@ export async function assemble(
         `Rendering 1080p cut ${completedCuts + 1}/${totalPlannedCuts}`
       );
 
+      if (!clipPath || clipPath === "procedural:graphic") {
+        await makeEditorialGraphicClip(outPath, durationSec, opts);
+        renderedCuts.push(outPath);
+        completedCuts++;
+        continue;
+      }
       if (!clipPath) {
         console.warn(`[assembler] Section ${i} cut ${ci}: no clip assigned, using fallback`);
         const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci) % globalPool.length] : "";

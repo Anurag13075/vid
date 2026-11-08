@@ -40,10 +40,7 @@ export const Route = createFileRoute("/")({
           "Dictate with Wispr Flow. Watch Groq, ElevenLabs, and FFmpeg research, script, narrate, and edit multi-minute YouTube documentaries in real time.",
       },
       { property: "og:title", content: "VidRush — Voice-Directed AI Video Pipeline" },
-      {
-        property: "og:description",
-        content: "Built for Wispr Flow & VMake Dev Hackathon 2026. A voice-first documentary video creator.",
-      },
+      
     ],
   }),
   component: Landing,

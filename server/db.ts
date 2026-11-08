@@ -28,7 +28,6 @@ if (!useLocalJson) {
   }
 }
 
-// Local JSON Store helpers
 interface VideoRecord {
   id: string;
   title: string;
@@ -219,6 +218,9 @@ export async function createVideo(data: {
   );
 }
 
+
+
+
 export async function listVideos(): Promise<any[]> {
   if (useLocalJson || !pool) {
     const db = ensureLocalDbFile();
@@ -231,3 +233,5 @@ export async function listVideos(): Promise<any[]> {
   );
   return res?.rows || [];
 }
+
+

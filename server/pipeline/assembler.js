@@ -131,7 +131,7 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
     const grainFilter = caps.filters.has("noise") ? ",noise=alls=8:allf=t+u" : "";
   const vignetteFilter = caps.filters.has("vignette") ? ",vignette=PI/4.5" : "";
     const letterboxFilter = caps.filters.has("drawbox")
-        ? ",drawbox=x=0:y=0:w=1920:h=48:color=black@1.0:t=fill,drawbox=x=0:y=1032:w=1920:h=48:color=black@1.0:t=fill"
+        ? ",drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill"
         : "";
     const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${grainFilter}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
     const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
@@ -152,6 +152,23 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
     ], cutOpts);
 }
 // ─── Dark Gradient Scene Fallback ────────────────────────────────────────────
+
+async function makeEditorialGraphicClip(outPath, durationSec, options) {
+  const caps = getFFmpegCapabilities();
+  const filter = "color=c=0x0a0a0f:size=1920x1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4.5,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p";
+  await ffmpeg([
+    "-f", "lavfi",
+    "-i", filter,
+    "-t", durationSec.toFixed(3),
+    "-r", String(FPS),
+    "-c:v", "libx264", "-crf", String(CRF), "-preset", PRESET,
+    "-pix_fmt", "yuv420p",
+    "-g", "30", "-keyint_min", "30",
+    "-video_track_timescale", "30000",
+    "-an", "-y", outPath,
+  ], options);
+}
+
 async function makeDarkSceneClip(outPath, durationSec, options) {
     const caps = getFFmpegCapabilities();
     const lavfiSrc = caps.filters.has("gradients")
@@ -214,7 +231,7 @@ async function generateAssKaraoke(sections, sectionTimings, audioPaths, assPath,
                 const showStart = t.startSec + 0.8;
                 const showEnd = Math.min(t.startSec + 4.5, t.endSec - 0.4);
                 if (showEnd > showStart + 1.0) {
-                    events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(300,300)}◆ ${escapeAss(t.keyPoint)}\n`;
+                    events += `Dialogue: 2,${assTime(showStart)},${assTime(showEnd)},StatCard,,0,0,0,,{\\fad(200,200)}◆ ${escapeAss(t.keyPoint)}\n`;
                 }
             }
             if (t.chapterTitle) {
@@ -290,14 +307,14 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,48,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.5,1.5,2,80,80,75,1
+Style: Default,DejaVu Sans,44,${white},${accentColor},${black},${shadowBox},1,0,0,0,100,100,1,0,1,3.2,1.2,2,100,100,150,1
 Style: TitleBadge,DejaVu Sans,24,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,3,0,3,2,2,8,80,80,85,1
 Style: TitleCard,DejaVu Sans,44,${white},${white},${black},${shadowBox},1,0,0,0,100,100,1,0,3,3,3,8,80,80,135,1
 Style: StatCard,DejaVu Sans,38,${white},${white},${black},${cardBox},1,0,0,0,100,100,1,0,3,3,3,8,120,120,80,1
 Style: ChapterTag,DejaVu Sans,24,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,60,1
 Style: ChapterCard,DejaVu Sans,44,${accentColor},${white},${black},${cardBox},1,0,0,0,100,100,3,0,3,3,3,5,80,80,0,1
-Style: LocationBadge,DejaVu Sans,22,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,2,2,7,80,80,75,1
-Style: DossierTag,DejaVu Sans,18,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,1.5,1.5,9,80,80,75,1
+Style: LocationBadge,DejaVu Sans,22,${white},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,2,2,7,100,100,145,1
+Style: DossierTag,DejaVu Sans,18,${accentColor},${white},${black},${shadowBox},1,0,0,0,100,100,2,0,3,1.5,1.5,9,100,100,145,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -620,7 +637,13 @@ export async function assemble(videoId, videoTitle, sections, audioPaths, footag
             const motion = MOTION_CYCLE[motionIdx++ % MOTION_CYCLE.length];
             const outPath = path.join(tmpDir, `cut_${i}_${ci}.mp4`);
             await onProgress(1 + (completedCuts / Math.max(totalPlannedCuts, 1)) * 0.95, total, `Rendering 1080p cut ${completedCuts + 1}/${totalPlannedCuts}`);
-            if (!clipPath) {
+            if (!clipPath || clipPath === "procedural:graphic") {
+        await makeEditorialGraphicClip(outPath, durationSec, opts);
+        renderedCuts.push(outPath);
+        completedCuts++;
+        continue;
+      }
+      if (!clipPath) {
                 console.warn(`[assembler] Section ${i} cut ${ci}: no clip assigned, using fallback`);
                 const fallbackClip = globalPool.length > 0 ? globalPool[(i + ci) % globalPool.length] : "";
                 if (fallbackClip) {

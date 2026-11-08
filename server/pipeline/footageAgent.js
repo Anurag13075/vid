@@ -207,6 +207,109 @@ async function searchPixabay(keyword, needed, usedIds) {
     return clips;
 }
 
+
+async function searchWikimedia(
+  keyword,
+  needed,
+  usedIds
+) {
+  const clips = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 18_000);
+    const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(keyword)}&gsrnamespace=6&gsrlimit=12&prop=imageinfo&iiprop=url|size|extmetadata|dimensions&format=json&origin=*`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "VidRush/2.0 (documentary-generator; contact@vidrush.app)" },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return clips;
+    const data = await res.json();
+    const pages = Object.values(data?.query?.pages || {});
+    for (const page of pages) {
+      if (clips.length >= needed) break;
+      const info = page.imageinfo?.[0];
+      if (!info?.url || !info.width || info.width < 900) continue;
+      if (!/\.(jpe?g|png|webp)$/i.test(info.url)) continue;
+      const titleLower = (page.title || "").toLowerCase();
+      if (titleLower.includes("icon") || titleLower.includes("flag") || titleLower.includes("logo") || titleLower.includes("coat of arms")) continue;
+
+      const idStr = `wiki_${page.pageid || Math.abs(hashCode(info.url))}`;
+      if (usedIds.has(idStr)) continue;
+
+      usedIds.add(idStr);
+      const license = info.extmetadata?.LicenseShortName?.value || "Public Domain";
+      const author = info.extmetadata?.Artist?.value ? String(info.extmetadata.Artist.value).replace(/<[^>]*>/g, "").slice(0, 50) : "Wikimedia Commons";
+
+      clips.push({
+        id: page.pageid || Date.now(),
+        keyword,
+        thumbUrl: info.thumburl || info.url,
+        videoUrl: info.url,
+        source: "wikimedia",
+        externalId: idStr,
+        duration: 8,
+        license: `Wikimedia Commons (${license})`,
+        author,
+        sourceUrl: info.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(page.title)}`,
+        status: "pending",
+      });
+    }
+  } catch (err) {}
+  return clips;
+}
+
+async function searchNasa(
+  keyword,
+  needed,
+  usedIds
+) {
+  const clips = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 18_000);
+    const url = `https://images-api.nasa.gov/search?q=${encodeURIComponent(keyword)}&media_type=image`;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return clips;
+    const data = await res.json();
+    const items = data?.collection?.items || [];
+    for (const item of items) {
+      if (clips.length >= needed) break;
+      const href = item.links?.[0]?.href;
+      const nasaId = item.data?.[0]?.nasa_id;
+      if (!href || !nasaId) continue;
+      const idStr = `nasa_${nasaId}`;
+      if (usedIds.has(idStr)) continue;
+
+      usedIds.add(idStr);
+      clips.push({
+        id: Math.abs(hashCode(idStr)),
+        keyword,
+        thumbUrl: href,
+        videoUrl: href,
+        source: "nasa",
+        externalId: idStr,
+        duration: 8,
+        license: "NASA Public Domain",
+        author: "NASA",
+        sourceUrl: `https://images.nasa.gov/details-${nasaId}`,
+        status: "pending",
+      });
+    }
+  } catch (err) {}
+  return clips;
+}
+
+function hashCode(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
+
 async function searchPexelsPhotos(keyword, needed, usedIds) {
     const clips = [];
     const apiKey = (process.env.PEXELS_API_KEY || "sYsJWjfNBleX61WYAZfRlenvWr1z2UkP7LlbieI9igmsX1k7Tv8yD27G").trim();
@@ -257,65 +360,110 @@ async function searchPexelsPhotos(keyword, needed, usedIds) {
     return clips;
 }
 
-export async function findMultipleFootage(section, limit, videoId, usedIds, title) {
-    const clips = [];
-    const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 3);
+export async function findMultipleFootage(
+  section,
+  limit,
+  videoId,
+  usedIds,
+  title
+) {
+  const clips = [];
+  const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 3);
+  const visualType = section.visual_type || (section.section_type === "stat" ? "STAT_SLAM" : "B_ROLL");
 
-    const cleanKeywords = (section.visual_keywords || [])
-        .map(sanitizeKeyword)
-        .filter(Boolean);
-
-    const initialKeywords = cleanKeywords.length > 0
-        ? cleanKeywords
-        : [sanitizeKeyword(section.key_point || "") || sanitizeKeyword(title)];
-
-    const keywordsToTry = Array.from(new Set(initialKeywords.filter(Boolean))).slice(0, 3);
-    const topicFallbacks = buildTopicFallbacks(title, section);
-
-    // Phase 1: Pexels Videos API with direct scene keywords
-    for (const keyword of keywordsToTry) {
-        if (clips.length >= clipsNeeded) break;
-        const found = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
-        clips.push(...found);
-    }
-
-    // Phase 2: Pixabay Videos API with direct scene keywords
-    if (clips.length < clipsNeeded) {
-        for (const keyword of keywordsToTry) {
-            if (clips.length >= clipsNeeded) break;
-            const found = await searchPixabay(keyword, clipsNeeded - clips.length, usedIds);
-            clips.push(...found);
-        }
-    }
-
-    // Phase 3: High-Res Pexels Photos for the scene keyword (rendered with dynamic Ken Burns)
-    if (clips.length < clipsNeeded) {
-        for (const keyword of keywordsToTry) {
-            if (clips.length >= clipsNeeded) break;
-            const photos = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
-            clips.push(...photos);
-        }
-    }
-
-    // Phase 4: Topic-Anchored Searches (searches core documentary topic rather than generic filler)
-    if (clips.length < clipsNeeded) {
-        for (const keyword of topicFallbacks) {
-            if (clips.length >= clipsNeeded) break;
-            const pexelsFound = await searchPexels(keyword, clipsNeeded - clips.length, usedIds);
-            clips.push(...pexelsFound);
-            if (clips.length < clipsNeeded) {
-                const pixabayFound = await searchPixabay(keyword, clipsNeeded - clips.length, usedIds);
-                clips.push(...pixabayFound);
-            }
-            if (clips.length < clipsNeeded) {
-                const photosFound = await searchPexelsPhotos(keyword, clipsNeeded - clips.length, usedIds);
-                clips.push(...photosFound);
-            }
-        }
-    }
-
-    console.log(`[footage] Section ${section.id} ("${keywordsToTry[0] || title}"): ${clips.length}/${clipsNeeded} clips found`);
+  // Route editorial graphic scenes directly to procedural graphic cards
+  if (["ACT_TITLE", "STAT_SLAM", "EVIDENCE_CARD", "TEXT_VOID"].includes(visualType)) {
+    clips.push({
+      id: section.id * 1000,
+      keyword: visualType.toLowerCase(),
+      thumbUrl: "",
+      videoUrl: "procedural:graphic",
+      source: "graphic",
+      externalId: `graphic_${section.id}`,
+      duration: 8,
+      license: "Procedural Editorial Graphic",
+      status: "pending",
+    });
     return clips;
+  }
+
+  const queries = (section.queries && section.queries.length > 0)
+    ? section.queries
+    : (section.visual_keywords || []).map(sanitizeKeyword).filter(Boolean);
+
+  const keywordsToTry = Array.from(new Set(queries.filter(Boolean))).slice(0, 3);
+  const topicLower = title.toLowerCase();
+  const isSpace = topicLower.includes("space") || topicLower.includes("nasa") || topicLower.includes("moon") || topicLower.includes("mars") || topicLower.includes("orbit");
+  const isHistorical = visualType === "ARCHIVAL_PHOTO" || topicLower.includes("history") || topicLower.includes("war") || topicLower.includes("empire") || topicLower.includes("coup") || topicLower.includes("19") || topicLower.includes("20");
+
+  // Phase 1: High-Specificity Wikimedia & NASA queries
+  if (isHistorical || visualType === "ARCHIVAL_PHOTO") {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const wikiFound = await searchWikimedia(kw, clipsNeeded - clips.length, usedIds);
+      clips.push(...wikiFound);
+    }
+  }
+
+  if (isSpace && clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const nasaFound = await searchNasa(kw, clipsNeeded - clips.length, usedIds);
+      clips.push(...nasaFound);
+    }
+  }
+
+  // Phase 2: Pexels Video
+  for (const kw of keywordsToTry) {
+    if (clips.length >= clipsNeeded) break;
+    const pexelsFound = await searchPexels(kw, clipsNeeded - clips.length, usedIds);
+    clips.push(...pexelsFound);
+  }
+
+  // Phase 3: Pixabay Video
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const pixabayFound = await searchPixabay(kw, clipsNeeded - clips.length, usedIds);
+      clips.push(...pixabayFound);
+    }
+  }
+
+  // Phase 4: Pexels High-Res Photos
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const photos = await searchPexelsPhotos(kw, clipsNeeded - clips.length, usedIds);
+      clips.push(...photos);
+    }
+  }
+
+  // Phase 5: Wikimedia Fallback
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const wikiFallback = await searchWikimedia(kw, clipsNeeded - clips.length, usedIds);
+      clips.push(...wikiFallback);
+    }
+  }
+
+  // Quality Gate: If 0 clips found, never show unrelated filler - route to procedural graphic!
+  if (clips.length === 0) {
+    console.log(`[quality-gate] Section ${section.id}: routing to procedural editorial graphic`);
+    clips.push({
+      id: section.id * 1000,
+      keyword: "editorial-card",
+      thumbUrl: "",
+      videoUrl: "procedural:graphic",
+      source: "graphic",
+      externalId: `graphic_${section.id}`,
+      duration: 8,
+      license: "Procedural Editorial Graphic",
+      status: "pending",
+    });
+  }
+
+  return clips;
 }
 
 async function downloadUrlToFile(url, destPath, timeoutMs = 35000) {
@@ -348,6 +496,11 @@ async function downloadUrlToFile(url, destPath, timeoutMs = 35000) {
 }
 
 export async function downloadClip(clip, videoId, suffix) {
+    if (clip.videoUrl === "procedural:graphic" || clip.source === "graphic") {
+        clip.localPath = "procedural:graphic";
+        clip.status = "ready";
+        return "procedural:graphic";
+    }
     const tmpDir = getTempDir(videoId);
     await fs.mkdir(tmpDir, { recursive: true });
 

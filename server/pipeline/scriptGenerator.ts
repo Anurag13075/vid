@@ -1,16 +1,21 @@
 import type { Script, ScriptSection } from "./types.js";
 
-const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"; // api url endpoint to grok for ai calls
 
-let cachedGroqModels: string[] | null = null;
-let lastGroqRequestAt = 0;
 
-type ResearchPack = {
-  context: string;
-  sources: string[];
+let cachedGroqModels: string[] | null = null;  // defining an array for supported models
+let lastGroqRequestAt = 0; // checking last grok request initializing from 0 
+
+ 
+  //type of research pack     
+
+type ResearchPack = {               
+  context: string;    // context of research
+  sources: string[];  // sources as a string
 };
 
-async function fetchResearch(title: string): Promise<ResearchPack> {
+
+async function fetchResearch(title: string): Promise<ResearchPack> {    //wikemedia featch for research 
   const empty: ResearchPack = { context: "No external research was available. Avoid inventing precise facts.", sources: [] };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
@@ -20,7 +25,7 @@ async function fetchResearch(title: string): Promise<ResearchPack> {
     const searchResponse = await fetch(searchUrl, { signal: controller.signal });
     if (!searchResponse.ok) return empty;
     const searchData = (await searchResponse.json()) as any;
-    const titles = (searchData.query?.search || []).map((item: any) => String(item.title || "")).filter(Boolean);
+    const titles = (searchData.query?.search || []).map((item: any) => String(item.title || "")).filter(Boolean); // searching the items and finding and them mapping over them to get the final array 
     if (titles.length === 0) return empty;
 
     const detailUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts|info&exintro=1&explaintext=1&inprop=url&redirects=1&titles=${encodeURIComponent(titles.join("|"))}&format=json&origin=*`;

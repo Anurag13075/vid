@@ -7,6 +7,7 @@ interface QueuedJob {
   fn: JobFn;
 }
 
+
 interface RunningJob {
   id: string;
   controller: AbortController;
@@ -36,6 +37,7 @@ class JobQueue {
       return { cancelled: true, wasRunning: true };
     }
 
+
     // 2. If waiting in queue, remove it so it never executes
     const idx = this.queue.findIndex((job) => job.id === id);
     if (idx !== -1) {
@@ -46,6 +48,9 @@ class JobQueue {
 
     return { cancelled: false, wasRunning: false };
   }
+
+
+
 
   isJobRunning(id: string): boolean {
     return this.currentJob?.id === id;

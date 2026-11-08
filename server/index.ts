@@ -156,6 +156,7 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
+
 // In production, serve the built frontend and let the SPA handle routing
 if (IS_PROD) {
   const candidatePaths = [
