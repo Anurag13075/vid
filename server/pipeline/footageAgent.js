@@ -354,46 +354,53 @@ async function searchPexelsPhotos(keyword, needed, usedIds) {
 }
 async function findMultipleFootage(section, limit, videoId, usedIds, title) {
   const clips = [];
-  const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 3);
+  const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 4);
   const visualType = section.visual_type || (section.section_type === "stat" ? "STAT_SLAM" : "B_ROLL");
-  if (["ACT_TITLE", "STAT_SLAM", "EVIDENCE_CARD", "TEXT_VOID"].includes(visualType)) {
-    clips.push({
-      id: section.id * 1e3,
-      keyword: visualType.toLowerCase(),
-      thumbUrl: "",
-      videoUrl: "procedural:graphic",
-      source: "graphic",
-      externalId: `graphic_${section.id}`,
-      duration: 8,
-      license: "Procedural Editorial Graphic",
-      status: "pending"
-    });
-    return clips;
-  }
   const queries = section.queries && section.queries.length > 0 ? section.queries : (section.visual_keywords || []).map(sanitizeKeyword).filter(Boolean);
-  const keywordsToTry = Array.from(new Set(queries.filter(Boolean))).slice(0, 3);
+  const keywordsToTry = Array.from(new Set(queries.filter(Boolean))).slice(0, 4);
+  if (keywordsToTry.length === 0) {
+    keywordsToTry.push(sanitizeKeyword(section.title || title));
+  }
   const topicLower = title.toLowerCase();
   const isSpace = topicLower.includes("space") || topicLower.includes("nasa") || topicLower.includes("moon") || topicLower.includes("mars") || topicLower.includes("orbit");
   const isHistorical = visualType === "ARCHIVAL_PHOTO" || topicLower.includes("history") || topicLower.includes("war") || topicLower.includes("empire") || topicLower.includes("coup") || topicLower.includes("19") || topicLower.includes("20");
-  if (isHistorical || visualType === "ARCHIVAL_PHOTO") {
+  for (const kw of keywordsToTry) {
+    if (clips.length >= clipsNeeded) break;
+    const pexelsFound = await searchPexels(kw, 1, usedIds);
+    clips.push(...pexelsFound);
+  }
+  if (clips.length < clipsNeeded) {
     for (const kw of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
-      const wikiFound = await searchWikimedia(kw, clipsNeeded - clips.length, usedIds);
+      const pixabayFound = await searchPixabay(kw, 1, usedIds);
+      clips.push(...pixabayFound);
+    }
+  }
+  if (clips.length < clipsNeeded && (isHistorical || visualType === "ARCHIVAL_PHOTO" || keywordsToTry.length > 0)) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const wikiFound = await searchWikimedia(kw, 1, usedIds);
       clips.push(...wikiFound);
     }
   }
-  if (isSpace && clips.length < clipsNeeded) {
+  if (clips.length < clipsNeeded && isSpace) {
     for (const kw of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
-      const nasaFound = await searchNasa(kw, clipsNeeded - clips.length, usedIds);
+      const nasaFound = await searchNasa(kw, 1, usedIds);
       clips.push(...nasaFound);
     }
   }
-  while (clips.length < clipsNeeded) {
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const photos = await searchPexelsPhotos(kw, 1, usedIds);
+      clips.push(...photos);
+    }
+  }
+  if (clips.length < clipsNeeded) {
     const rawPrompt = section.visual_intent || section.visual_prompt || section.narration || title;
-    const cleanPrompt = rawPrompt.replace(/["\n\r]/g, " ").slice(0, 160).trim();
-    const variation = clips.length > 0 ? `, angle ${clips.length + 1}, alternate perspective` : "";
-    const styledPrompt = `${cleanPrompt}${variation}, authentic investigative documentary shot, 35mm photograph, cinematic lighting, high contrast chiaroscuro, anamorphic depth, Kodak 5219 texture, ultra detailed, historical realism, masterwork, 8k resolution, no cartoon, no 3d render, no generic stock`;
+    const cleanPrompt = rawPrompt.replace(/["\n\r]/g, " ").slice(0, 140).trim();
+    const styledPrompt = `${cleanPrompt}, authentic investigative documentary shot, 35mm photograph, cinematic lighting, high contrast chiaroscuro, anamorphic depth, Kodak 5219 texture, ultra detailed, historical realism`;
     const seed = Math.abs(hashCode(`${section.narration || ""}_${section.id}_${clips.length}_${videoId}`));
     const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(styledPrompt)}?width=1920&height=1080&nologo=true&model=flux&seed=${seed}`;
     clips.push({
@@ -403,7 +410,7 @@ async function findMultipleFootage(section, limit, videoId, usedIds, title) {
       videoUrl: pollinationsUrl,
       source: "pollinations",
       externalId: `pollinations_${section.id}_${seed}`,
-      duration: 12,
+      duration: 8,
       license: "Public Domain / AI Generated Documentary",
       status: "pending"
     });

@@ -162,7 +162,8 @@ async function renderCut(
   gradeFilter: string,
   isSectionStart = false,
   isSectionEnd = false,
-  options?: { videoId?: string; signal?: AbortSignal }
+  options?: { videoId?: string; signal?: AbortSignal },
+  startOffsetSec = 0
 ): Promise<void> {
   const caps = getFFmpegCapabilities();
   let transitionFilter = "";
@@ -183,10 +184,12 @@ async function renderCut(
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${grainFilter}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
 
   const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
+  const offsetArgs = (!isImage && startOffsetSec > 0) ? ["-ss", startOffsetSec.toFixed(2)] : [];
   const inputArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
   const cutOpts = { ...options, timeoutMs: 120000 };
 
   await ffmpeg([
+    ...offsetArgs,
     ...inputArgs,
     "-i", clipPath,
     "-vf", fullFilter,
@@ -205,7 +208,9 @@ async function renderCut(
 
 async function makeEditorialGraphicClip(outPath, durationSec, options) {
   const caps = getFFmpegCapabilities();
-  const filter = "color=c=0x0a0a0f:size=1920x1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4.5,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p";
+  const filter = caps.filters.has("gradients")
+    ? "gradients=s=1920x1080:c0=0x0a101d:c1=0x1e1b4b:x0=0:y0=0:x1=1920:y1=1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p"
+    : "color=c=0x0f172a:size=1920x1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p";
   await ffmpeg([
     "-f", "lavfi",
     "-i", filter,
@@ -246,13 +251,13 @@ async function makeDarkSceneClip(
 // Produces even-length cuts that sum exactly to audioDuration.
 // numClips is the number of distinct visual clips available for this section;
 // it caps total cuts so we don't redundantly re-encode the same clip.
-function sliceCuts(audioDuration: number, numClips = 1): number[] {
-  if (numClips <= 1 || audioDuration <= 14.0) {
-    return [audioDuration];
-  }
-  const idealCount = Math.min(numClips, Math.max(1, Math.round(audioDuration / CUT_TARGET_SEC)));
-  const cutDur = audioDuration / idealCount;
-  return new Array(idealCount).fill(cutDur);
+function sliceCuts(audioDuration: number, numClips = 3): number[] {
+  const CUT_TARGET_SEC = 4.5;
+  const CUT_MAX_SEC = 5.8;
+  if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
+  const count = Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC));
+  const cutDur = audioDuration / count;
+  return new Array(count).fill(cutDur);
 }
 
 function sanitizeDisplayTitle(raw: string): string {
@@ -1011,8 +1016,9 @@ export async function assemble(
       }
 
       try {
-        console.log(`[assembler] Rendering cut ${completedCuts + 1}/${totalPlannedCuts}: section=${i} clip=${path.basename(clipPath)} dur=${durationSec.toFixed(1)}s motion=${motion}`);
-        await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
+        const startOffset = ci * 4.2;
+        console.log(`[assembler] Rendering cut ${completedCuts + 1}/${totalPlannedCuts}: section=${i} clip=${path.basename(clipPath)} dur=${durationSec.toFixed(1)}s motion=${motion} offset=${startOffset.toFixed(1)}s`);
+        await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts, startOffset);
         renderedCuts.push(outPath);
       } catch (err: any) {
         if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {

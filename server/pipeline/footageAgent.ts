@@ -389,62 +389,70 @@ export async function findMultipleFootage(
   title: string
 ): Promise<Clip[]> {
   const clips: Clip[] = [];
-  const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 3);
+  const clipsNeeded = Math.min(limit || CLIPS_PER_SECTION, 4);
   const visualType = section.visual_type || (section.section_type === "stat" ? "STAT_SLAM" : "B_ROLL");
-
-  // Route editorial graphic scenes directly to procedural graphic cards
-  if (["ACT_TITLE", "STAT_SLAM", "EVIDENCE_CARD", "TEXT_VOID"].includes(visualType)) {
-    clips.push({
-      id: section.id * 1000,
-      keyword: visualType.toLowerCase(),
-      thumbUrl: "",
-      videoUrl: "procedural:graphic",
-      source: "graphic",
-      externalId: `graphic_${section.id}`,
-      duration: 8,
-      license: "Procedural Editorial Graphic",
-      status: "pending",
-    });
-    return clips;
-  }
 
   const queries = (section.queries && section.queries.length > 0)
     ? section.queries
     : (section.visual_keywords || []).map(sanitizeKeyword).filter(Boolean);
 
-  const keywordsToTry = Array.from(new Set(queries.filter(Boolean))).slice(0, 3);
+  const keywordsToTry = Array.from(new Set(queries.filter(Boolean))).slice(0, 4);
+  if (keywordsToTry.length === 0) {
+    keywordsToTry.push(sanitizeKeyword(section.title || title));
+  }
+
   const topicLower = title.toLowerCase();
   const isSpace = topicLower.includes("space") || topicLower.includes("nasa") || topicLower.includes("moon") || topicLower.includes("mars") || topicLower.includes("orbit");
   const isHistorical = visualType === "ARCHIVAL_PHOTO" || topicLower.includes("history") || topicLower.includes("war") || topicLower.includes("empire") || topicLower.includes("coup") || topicLower.includes("19") || topicLower.includes("20");
 
-  // Phase 1: High-Specificity Wikimedia & NASA queries for verified historical figures & space missions
-  if (isHistorical || visualType === "ARCHIVAL_PHOTO") {
+  // Phase 1: High-Specificity Real Video Clips (Pexels Video)
+  for (const kw of keywordsToTry) {
+    if (clips.length >= clipsNeeded) break;
+    const pexelsFound = await searchPexels(kw, 1, usedIds);
+    clips.push(...pexelsFound);
+  }
+
+  // Phase 2: High-Specificity Real Video Clips (Pixabay Video)
+  if (clips.length < clipsNeeded) {
     for (const kw of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
-      const wikiFound = await searchWikimedia(kw, clipsNeeded - clips.length, usedIds);
+      const pixabayFound = await searchPixabay(kw, 1, usedIds);
+      clips.push(...pixabayFound);
+    }
+  }
+
+  // Phase 3: Wikimedia Commons Archival Photos & Video
+  if (clips.length < clipsNeeded && (isHistorical || visualType === "ARCHIVAL_PHOTO" || keywordsToTry.length > 0)) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const wikiFound = await searchWikimedia(kw, 1, usedIds);
       clips.push(...wikiFound);
     }
   }
 
-  if (isSpace && clips.length < clipsNeeded) {
+  // Phase 4: NASA Video & Imagery Library
+  if (clips.length < clipsNeeded && isSpace) {
     for (const kw of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
-      const nasaFound = await searchNasa(kw, clipsNeeded - clips.length, usedIds);
+      const nasaFound = await searchNasa(kw, 1, usedIds);
       clips.push(...nasaFound);
     }
   }
 
-  // Phase 2: Direct Bespoke AI Visual Generation via Pollinations (Flux.1)
-  // Replaces random Pexels/Pixabay stock entirely to eliminate mismatched clips and repetitive video looping!
-  while (clips.length < clipsNeeded) {
-    const rawPrompt = section.visual_intent || section.visual_prompt || section.narration || title;
-    const cleanPrompt = rawPrompt
-      .replace(/["\n\r]/g, " ")
-      .slice(0, 160)
-      .trim();
+  // Phase 5: High-Res Pexels Professional Photography (Dynamic Ken Burns Texture)
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const photos = await searchPexelsPhotos(kw, 1, usedIds);
+      clips.push(...photos);
+    }
+  }
 
-    const variation = clips.length > 0 ? `, angle ${clips.length + 1}, alternate perspective` : "";
-    const styledPrompt = `${cleanPrompt}${variation}, authentic investigative documentary shot, 35mm photograph, cinematic lighting, high contrast chiaroscuro, anamorphic depth, Kodak 5219 texture, ultra detailed, historical realism, masterwork, 8k resolution, no cartoon, no 3d render, no generic stock`;
+  // Phase 6: Bespoke Pollinations AI Generation (Only if more visuals needed)
+  if (clips.length < clipsNeeded) {
+    const rawPrompt = section.visual_intent || section.visual_prompt || section.narration || title;
+    const cleanPrompt = rawPrompt.replace(/["\n\r]/g, " ").slice(0, 140).trim();
+    const styledPrompt = `${cleanPrompt}, authentic investigative documentary shot, 35mm photograph, cinematic lighting, high contrast chiaroscuro, anamorphic depth, Kodak 5219 texture, ultra detailed, historical realism`;
     const seed = Math.abs(hashCode(`${section.narration || ""}_${section.id}_${clips.length}_${videoId}`));
     const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(styledPrompt)}?width=1920&height=1080&nologo=true&model=flux&seed=${seed}`;
 
@@ -455,7 +463,7 @@ export async function findMultipleFootage(
       videoUrl: pollinationsUrl,
       source: "pollinations",
       externalId: `pollinations_${section.id}_${seed}`,
-      duration: 12,
+      duration: 8,
       license: "Public Domain / AI Generated Documentary",
       status: "pending",
     });

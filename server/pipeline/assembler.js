@@ -109,7 +109,7 @@ function buildKenBurnsFilter(motion, durationSec) {
       return `scale=1920:1200:force_original_aspect_ratio=increase,crop=1920:1080:x=0:y=120*(1-${prog})`;
   }
 }
-async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter, isSectionStart = false, isSectionEnd = false, options) {
+async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter, isSectionStart = false, isSectionEnd = false, options, startOffsetSec = 0) {
   const caps = getFFmpegCapabilities();
   let transitionFilter = "";
   if (caps.filters.has("fade")) {
@@ -125,9 +125,11 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
   const letterboxFilter = caps.filters.has("drawbox") ? ",drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill" : "";
   const fullFilter = `${buildKenBurnsFilter(motionType, durationSec)}${gradeStr}${grainFilter}${vignetteFilter}${letterboxFilter}${transitionFilter},format=yuv420p`;
   const isImage = /\.(jpe?g|png|webp|avif)$/i.test(clipPath);
+  const offsetArgs = !isImage && startOffsetSec > 0 ? ["-ss", startOffsetSec.toFixed(2)] : [];
   const inputArgs = isImage ? ["-loop", "1"] : ["-stream_loop", "-1"];
   const cutOpts = { ...options, timeoutMs: 12e4 };
   await ffmpeg([
+    ...offsetArgs,
     ...inputArgs,
     "-i",
     clipPath,
@@ -160,7 +162,7 @@ async function renderCut(clipPath, durationSec, motionType, outPath, gradeFilter
 }
 async function makeEditorialGraphicClip(outPath, durationSec, options) {
   const caps = getFFmpegCapabilities();
-  const filter = "color=c=0x0a0a0f:size=1920x1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4.5,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p";
+  const filter = caps.filters.has("gradients") ? "gradients=s=1920x1080:c0=0x0a101d:c1=0x1e1b4b:x0=0:y0=0:x1=1920:y1=1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p" : "color=c=0x0f172a:size=1920x1080:rate=30,noise=alls=10:allf=t+u,vignette=PI/4,drawbox=x=0:y=0:w=1920:h=131:color=black@1.0:t=fill,drawbox=x=0:y=949:w=1920:h=131:color=black@1.0:t=fill,format=yuv420p";
   await ffmpeg([
     "-f",
     "lavfi",
@@ -220,13 +222,13 @@ async function makeDarkSceneClip(outPath, durationSec, options) {
     outPath
   ], options);
 }
-function sliceCuts(audioDuration, numClips = 1) {
-  if (numClips <= 1 || audioDuration <= 14) {
-    return [audioDuration];
-  }
-  const idealCount = Math.min(numClips, Math.max(1, Math.round(audioDuration / CUT_TARGET_SEC)));
-  const cutDur = audioDuration / idealCount;
-  return new Array(idealCount).fill(cutDur);
+function sliceCuts(audioDuration, numClips = 3) {
+  const CUT_TARGET_SEC2 = 4.5;
+  const CUT_MAX_SEC2 = 5.8;
+  if (audioDuration <= CUT_MAX_SEC2) return [audioDuration];
+  const count = Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC2));
+  const cutDur = audioDuration / count;
+  return new Array(count).fill(cutDur);
 }
 function sanitizeDisplayTitle(raw) {
   let clean = raw.replace(/^(?:create|make|generate|produce)\s+(?:a\s+)?(?:cinematic\s+|documentary\s+|youtube\s+|short\s+|long\s+)*(?:video\s+(?:about\s+|on\s+)?|documentary\s+(?:about\s+|on\s+)?)/i, "").replace(/^(?:subtitle\s*:\s*|title\s*:\s*)/i, "").trim();
@@ -976,8 +978,9 @@ async function assemble(videoId, videoTitle, sections, audioPaths, footagePathsP
         continue;
       }
       try {
-        console.log(`[assembler] Rendering cut ${completedCuts + 1}/${totalPlannedCuts}: section=${i} clip=${path.basename(clipPath)} dur=${durationSec.toFixed(1)}s motion=${motion}`);
-        await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts);
+        const startOffset = ci * 4.2;
+        console.log(`[assembler] Rendering cut ${completedCuts + 1}/${totalPlannedCuts}: section=${i} clip=${path.basename(clipPath)} dur=${durationSec.toFixed(1)}s motion=${motion} offset=${startOffset.toFixed(1)}s`);
+        await renderCut(clipPath, durationSec, motion, outPath, gradeFilter, isSectionStart, isSectionEnd, opts, startOffset);
         renderedCuts.push(outPath);
       } catch (err) {
         if (signal?.aborted || err?.message?.includes("cancelled") || err?.message?.includes("aborted")) {
