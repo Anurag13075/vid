@@ -220,13 +220,11 @@ async function makeDarkSceneClip(outPath, durationSec, options) {
     outPath
   ], options);
 }
-function sliceCuts(audioDuration, numClips = 3) {
-  if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
-  const maxCutsForSection = Math.max(2, Math.round(audioDuration / CUT_MIN_SEC));
-  const idealCount = Math.min(
-    Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)),
-    maxCutsForSection
-  );
+function sliceCuts(audioDuration, numClips = 1) {
+  if (numClips <= 1 || audioDuration <= 14) {
+    return [audioDuration];
+  }
+  const idealCount = Math.min(numClips, Math.max(1, Math.round(audioDuration / CUT_TARGET_SEC)));
   const cutDur = audioDuration / idealCount;
   return new Array(idealCount).fill(cutDur);
 }

@@ -417,7 +417,7 @@ export async function findMultipleFootage(
   const isSpace = topicLower.includes("space") || topicLower.includes("nasa") || topicLower.includes("moon") || topicLower.includes("mars") || topicLower.includes("orbit");
   const isHistorical = visualType === "ARCHIVAL_PHOTO" || topicLower.includes("history") || topicLower.includes("war") || topicLower.includes("empire") || topicLower.includes("coup") || topicLower.includes("19") || topicLower.includes("20");
 
-  // Phase 1: High-Specificity Wikimedia & NASA queries
+  // Phase 1: High-Specificity Wikimedia & NASA queries for verified historical figures & space missions
   if (isHistorical || visualType === "ARCHIVAL_PHOTO") {
     for (const kw of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;
@@ -434,52 +434,28 @@ export async function findMultipleFootage(
     }
   }
 
-  // Phase 2: Pexels Video
-  for (const kw of keywordsToTry) {
-    if (clips.length >= clipsNeeded) break;
-    const pexelsFound = await searchPexels(kw, clipsNeeded - clips.length, usedIds);
-    clips.push(...pexelsFound);
-  }
+  // Phase 2: Direct Bespoke AI Visual Generation via Pollinations (Flux.1)
+  // Replaces random Pexels/Pixabay stock entirely to eliminate mismatched clips and repetitive video looping!
+  while (clips.length < clipsNeeded) {
+    const rawPrompt = section.visual_intent || section.visual_prompt || section.narration || title;
+    const cleanPrompt = rawPrompt
+      .replace(/["\n\r]/g, " ")
+      .slice(0, 160)
+      .trim();
 
-  // Phase 3: Pixabay Video
-  if (clips.length < clipsNeeded) {
-    for (const kw of keywordsToTry) {
-      if (clips.length >= clipsNeeded) break;
-      const pixabayFound = await searchPixabay(kw, clipsNeeded - clips.length, usedIds);
-      clips.push(...pixabayFound);
-    }
-  }
+    const variation = clips.length > 0 ? `, angle ${clips.length + 1}, alternate perspective` : "";
+    const styledPrompt = `${cleanPrompt}${variation}, authentic investigative documentary shot, 35mm photograph, cinematic lighting, high contrast chiaroscuro, anamorphic depth, Kodak 5219 texture, ultra detailed, historical realism, masterwork, 8k resolution, no cartoon, no 3d render, no generic stock`;
+    const seed = Math.abs(hashCode(`${section.narration || ""}_${section.id}_${clips.length}_${videoId}`));
+    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(styledPrompt)}?width=1920&height=1080&nologo=true&model=flux&seed=${seed}`;
 
-  // Phase 4: Pexels High-Res Photos
-  if (clips.length < clipsNeeded) {
-    for (const kw of keywordsToTry) {
-      if (clips.length >= clipsNeeded) break;
-      const photos = await searchPexelsPhotos(kw, clipsNeeded - clips.length, usedIds);
-      clips.push(...photos);
-    }
-  }
-
-  // Phase 5: Wikimedia Fallback
-  if (clips.length < clipsNeeded) {
-    for (const kw of keywordsToTry) {
-      if (clips.length >= clipsNeeded) break;
-      const wikiFallback = await searchWikimedia(kw, clipsNeeded - clips.length, usedIds);
-      clips.push(...wikiFallback);
-    }
-  }
-
-  // Phase 6: Bespoke Documentary AI Generation via Pollinations (Zero-Cost Flux)
-  if (clips.length < clipsNeeded && (section.visual_type === "ARCHIVAL_PHOTO" || section.visual_type === "B_ROLL" || section.visual_type === "DOC_CLIP")) {
-    const aiPrompt = section.visual_intent || section.narration.slice(0, 120);
-    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(aiPrompt + ", 1980s 35mm photo, authentic documentary archive, cinematic chiaroscuro lighting, anamorphic lens, realistic texture, 35mm grain, highly detailed historical look")}?width=1920&height=1080&nologo=true&model=flux`;
     clips.push({
-      id: section.id * 1000 + 1,
-      keyword: aiPrompt,
+      id: section.id * 1000 + clips.length + 1,
+      keyword: cleanPrompt,
       thumbUrl: pollinationsUrl,
       videoUrl: pollinationsUrl,
       source: "pollinations",
-      externalId: `pollinations_${section.id}`,
-      duration: 8,
+      externalId: `pollinations_${section.id}_${seed}`,
+      duration: 12,
       license: "Public Domain / AI Generated Documentary",
       status: "pending",
     });

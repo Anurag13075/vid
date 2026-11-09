@@ -55,11 +55,20 @@ async function runAudit() {
     assert(chunks.length === 1, `TTS text chunking verified (${chunks.length} chunk)`);
 
     const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunks[0])}&tl=en&client=tw-ob`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-    });
+    let res;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        res = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          },
+        });
+        if (res.ok) break;
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
     assert(res.ok, `Free TTS synthesis endpoint reachable (HTTP ${res.status})`);
     const ab = await res.arrayBuffer();
     assert(ab.byteLength > 1000, `Synthesized spoken audio data received (${ab.byteLength} bytes)`);
@@ -91,16 +100,12 @@ async function runAudit() {
   // ── TEST 4: Cut Slicer Algorithm & Timing Precision ─────────────────────────
   console.log("\n[4/7] Testing Video Cut Slicer & Synchronization...");
   try {
-    function sliceCuts(audioDuration, numClips = 2) {
-      const CUT_TARGET_SEC = 4.5;
-      const CUT_MIN_SEC = 3.2;
-      const CUT_MAX_SEC = 6.0;
-      if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
-      const maxCutsForSection = Math.max(2, Math.round(audioDuration / CUT_MIN_SEC));
-      const idealCount = Math.min(
-        Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)),
-        maxCutsForSection
-      );
+    function sliceCuts(audioDuration, numClips = 1) {
+      if (numClips <= 1 || audioDuration <= 14.0) {
+        return [audioDuration];
+      }
+      const CUT_TARGET_SEC = 5.0;
+      const idealCount = Math.min(numClips, Math.max(1, Math.round(audioDuration / CUT_TARGET_SEC)));
       const cutDur = audioDuration / idealCount;
       return new Array(idealCount).fill(cutDur);
     }

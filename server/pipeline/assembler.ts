@@ -246,13 +246,11 @@ async function makeDarkSceneClip(
 // Produces even-length cuts that sum exactly to audioDuration.
 // numClips is the number of distinct visual clips available for this section;
 // it caps total cuts so we don't redundantly re-encode the same clip.
-function sliceCuts(audioDuration: number, numClips = 3): number[] {
-  if (audioDuration <= CUT_MAX_SEC) return [audioDuration];
-  const maxCutsForSection = Math.max(2, Math.round(audioDuration / CUT_MIN_SEC));
-  const idealCount = Math.min(
-    Math.max(2, Math.round(audioDuration / CUT_TARGET_SEC)),
-    maxCutsForSection
-  );
+function sliceCuts(audioDuration: number, numClips = 1): number[] {
+  if (numClips <= 1 || audioDuration <= 14.0) {
+    return [audioDuration];
+  }
+  const idealCount = Math.min(numClips, Math.max(1, Math.round(audioDuration / CUT_TARGET_SEC)));
   const cutDur = audioDuration / idealCount;
   return new Array(idealCount).fill(cutDur);
 }
