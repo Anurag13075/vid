@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import https from "https";
 import http from "http";
+import crypto from "crypto";
 import { createWriteStream } from "fs";
 import type { ScriptSection, Clip } from "./types.js";
 import { getTempDir } from "./tempDir.js";
@@ -101,6 +102,93 @@ function buildTopicFallbacks(title: string, section: ScriptSection): string[] {
   }
 
   return fallbacks.filter(Boolean);
+}
+
+async function searchStoryblocks(
+  keyword: string,
+  needed: number,
+  usedIds: Set<string>
+): Promise<Clip[]> {
+  const clips: Clip[] = [];
+  const publicKey = (process.env.STORYBLOCKS_PUBLIC_KEY || "").trim();
+  const privateKey = (process.env.STORYBLOCKS_PRIVATE_KEY || "").trim();
+  if (!publicKey || !privateKey) return clips;
+
+  try {
+    const expires = Math.floor(Date.now() / 1000) + 1800;
+    const resource = "/api/v2/videos/search";
+    const hmacKey = privateKey + expires;
+    const hmac = crypto.createHmac("sha256", hmacKey).update(resource).digest("hex");
+
+    const url = `https://api.storyblocks.com${resource}?APIKEY=${encodeURIComponent(publicKey)}&EXPIRES=${expires}&HMAC=${hmac}&keywords=${encodeURIComponent(keyword)}&project_id=vidrush_solo&user_id=creator_1&results_per_page=12`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20_000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      console.warn(`[storyblocks] "${keyword}": HTTP ${res.status}`);
+      return clips;
+    }
+
+    const data = (await res.json()) as any;
+    const results = (data.results || []).filter((r: any) => !usedIds.has(`storyblocks_${r.id}`));
+
+    for (const item of results) {
+      if (clips.length >= needed) break;
+      const idStr = `storyblocks_${item.id}`;
+      if (usedIds.has(idStr)) continue;
+
+      let videoUrl = "";
+      try {
+        const dlExpires = Math.floor(Date.now() / 1000) + 1800;
+        const dlResource = `/api/v2/videos/stock-item/download/${item.id}`;
+        const dlHmacKey = privateKey + dlExpires;
+        const dlHmac = crypto.createHmac("sha256", dlHmacKey).update(dlResource).digest("hex");
+        const dlUrl = `https://api.storyblocks.com${dlResource}?APIKEY=${encodeURIComponent(publicKey)}&EXPIRES=${dlExpires}&HMAC=${dlHmac}&project_id=vidrush_solo&user_id=creator_1`;
+
+        const dlController = new AbortController();
+        const dlTimer = setTimeout(() => dlController.abort(), 12_000);
+        const dlRes = await fetch(dlUrl, { signal: dlController.signal });
+        clearTimeout(dlTimer);
+
+        if (dlRes.ok) {
+          const dlData = (await dlRes.json()) as any;
+          videoUrl = dlData.MP4?._1080p || dlData.MP4?._720p || dlData.MOV?._1080p || dlData.MP4?._2160p || "";
+        }
+      } catch (dlErr: any) {
+        console.warn(`[storyblocks] Download URL resolution for ${item.id} error:`, dlErr.message);
+      }
+
+      if (!videoUrl) {
+        videoUrl = item.preview_urls?._720p || item.preview_urls?._480p || item.preview_urls?._360p || "";
+      }
+
+      if (!videoUrl) continue;
+
+      usedIds.add(idStr);
+      clips.push({
+        id: item.id,
+        keyword,
+        thumbUrl: item.thumbnail_url || item.preview_urls?._180p || "",
+        videoUrl,
+        source: "storyblocks",
+        externalId: idStr,
+        duration: item.duration || 10,
+        license: "Storyblocks Commercial License",
+        sourceUrl: `https://www.storyblocks.com/video/stock/${item.id}`,
+        status: "pending",
+      });
+    }
+    if (clips.length > 0) {
+      console.log(`[storyblocks] Sourced ${clips.length} commercial clip(s) for "${keyword}"`);
+    }
+  } catch (err: any) {
+    console.warn(`[storyblocks] Error querying "${keyword}":`, err.message);
+  }
+
+  return clips;
 }
 
 async function searchPexels(
@@ -405,14 +493,23 @@ export async function findMultipleFootage(
   const isSpace = topicLower.includes("space") || topicLower.includes("nasa") || topicLower.includes("moon") || topicLower.includes("mars") || topicLower.includes("orbit");
   const isHistorical = visualType === "ARCHIVAL_PHOTO" || topicLower.includes("history") || topicLower.includes("war") || topicLower.includes("empire") || topicLower.includes("coup") || topicLower.includes("19") || topicLower.includes("20");
 
-  // Phase 1: High-Specificity Real Video Clips (Pexels Video)
+  // Phase 1: Commercial Documentary Footage (Storyblocks Commercial 1080p Library)
   for (const kw of keywordsToTry) {
     if (clips.length >= clipsNeeded) break;
-    const pexelsFound = await searchPexels(kw, 1, usedIds);
-    clips.push(...pexelsFound);
+    const storyblocksFound = await searchStoryblocks(kw, 2, usedIds);
+    clips.push(...storyblocksFound);
   }
 
-  // Phase 2: High-Specificity Real Video Clips (Pixabay Video)
+  // Phase 2: High-Specificity Real Video Clips (Pexels Video)
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const pexelsFound = await searchPexels(kw, 1, usedIds);
+      clips.push(...pexelsFound);
+    }
+  }
+
+  // Phase 3: High-Specificity Real Video Clips (Pixabay Video)
   if (clips.length < clipsNeeded) {
     for (const kw of keywordsToTry) {
       if (clips.length >= clipsNeeded) break;

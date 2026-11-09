@@ -353,24 +353,32 @@ Output a JSON object with a single "sections" array containing exactly ${count} 
   "sections": [
     {
       "id": ${startId},
-      "narration": "Spoken documentary narration...",
-      "visual_keywords": ["direct subject action", "macro technical detail", "establishing environment", "archival or document cue", "human-scale consequence"],
+      "narration": "Spoken documentary narration with dramatic cadence and pauses...",
+      "visual_intent": "Concrete physical scene description for camera (e.g. Dimly lit 1990s Wall Street trading desk with green CRT monitors)",
+      "queries": ["concrete query 1", "concrete query 2", "concrete query 3"],
+      "visual_keywords": ["physical noun 1", "physical noun 2", "physical noun 3"],
       "section_type": "${firstType}",
       "key_point": "Key statistic, date, or fact highlight",
+      "stat_number": ${isFirst ? 'null' : (startId % 3 === 0 ? '"$4.2B"' : 'null')},
+      "stat_label": ${isFirst ? 'null' : (startId % 3 === 0 ? '"Total Capital Vaporized"' : 'null')},
+      "document_headline": ${startId % 4 === 2 ? '"CONFIDENTIAL MEMO: SYSTEM CRASH"' : 'null'},
+      "highlighted_quote": ${startId % 4 === 2 ? '"The mathematical risk model failed to account for simultaneous liquidations."' : 'null'},
       "chapter_title": ${isFirst ? '"CHAPTER 01 · THE ANOMALY"' : (startId % 4 === 1 ? '"ACT II · THE ESCALATION"' : 'null')},
       "location_stamp": ${isFirst ? '"📍 [LOCATION] · [YEAR/DATE]"' : 'null'},
       "estimated_words": ${wordsPerSection},
-      "sfx": false
+      "sfx": true
     }
   ]
 }
 
 DOCUMENTARY NARRATIVE RULES:
-- LOCATION BADGES: In 'location_stamp', if this section references a specific historical location, city, bunker, or date/year from the research pack, format a concise HUD badge like '📍 NORMANDY · JUNE 1944' or '📍 CAPE CANAVERAL · 1969'. If no specific location/date applies to this section, set location_stamp to null. NEVER invent locations not in the research.
+- VISUAL INTENT & QUERIES: 'queries' MUST contain 3 separate 2-3 word searches targeting concrete physical objects and environments that exist in stock video footage (e.g. 'server room', 'stock ticker', 'abandoned office', 'vintage newsprint'). NEVER use abstract terms like 'economy', 'future', 'failure'.
+- STATS & EVIDENCE: For dramatic moments, provide 'stat_number' (e.g. '$500 Million', '1987', '0.00%') and 'stat_label'. If referencing a report or scandal, supply 'document_headline' and 'highlighted_quote'.
+- LOCATION BADGES: In 'location_stamp', if this section references a specific historical location, city, bunker, or date/year from the research pack, format a concise HUD badge like '📍 NORMANDY · JUNE 1944' or '📍 NEW YORK · 1987'. If no specific location/date applies to this section, set location_stamp to null.
 - CHAPTER TITLES: In 'chapter_title', provide a high-impact, topic-relevant act or chapter title for transition sections (like 'ACT I · THE INITIAL BREACH' or 'CHAPTER 02 · ESCALATION'), or null for standard middle scenes.
 ${isFirst ? `- Section ${startId} (COLD OPEN HOOK): Begin directly in media res with high stakes, a gripping sensory scene, or an unanswered paradox. NEVER say "In this video", "Welcome back", or "Today we look at". Hook the viewer immediately.` : ""}
 ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful philosophical resolution, lasting historical consequences, and an open reflection that leaves an impact. Set its section_type to "outro".` : ""}
-- All middle sections: Use "broll" or "stat" (use "stat" whenever specific numbers, dates, megatons, population figures, or historical milestones are mentioned).
+- All middle sections: Use "broll", "stat", or "graphic" (use "stat" whenever specific numbers, dates, megatons, population figures, or historical milestones are mentioned).
 - DOCUMENTARY STORYTELLING (MAGNATESMEDIA / VOX): Write with high narrative tension, visceral sensory scenes, human conflict, and mysterious pacing. NEVER sound like a textbook, corporate explainer, or Wikipedia.
   * BANNED PHRASES: NEVER use academic filler like "In this video", "Moreover", "Furthermore", "In conclusion", "As we can see", "Let's explore", or "It is crucial to note".
   * SENSORY PACING: Open scenes with physical environments and actions (e.g. "Behind the soundproof doors of Room 402...", "At 3:14 AM, the radar went dead..."). End scenes with unanswered questions that build suspense.
@@ -378,8 +386,6 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
 - RETENTION & PACING: Create tension, open loops between sections ("What the public wasn't told was far worse..."), and satisfying payoffs.
 - LENGTH: Each narration MUST be approximately ${wordsPerSection} to ${wordsPerSection + 15} words. Count carefully.
 - JSON SAFETY: NEVER use double quote characters inside narration, key_point, or visual_keywords. For quoted speech or titles, use single quotes. Do not put line breaks inside string values.
-- VISUAL KEYWORDS: Provide 3 to 5 CONCISE, 1-3 word stock footage search terms per section (e.g. 'cleanroom', 'silicon wafer', 'circuit board', 'battleship'). STRICT RULE: Maximum 3 words per keyword. Use ONLY concrete physical nouns, macro details, and specific environments (e.g. 'cleanroom', 'circuit board', 'microscope lens', 'vault door', 'submarine sonar', 'radar display'). NEVER use abstract concepts like 'technology', 'success', 'concept', 'disruption', or 'future'.
-  * STRICT NEGATIVES: NEVER use generic filler like 'business person', 'team meeting', 'laptop desk', 'concept', 'abstract background', 'cinematic'. Use only concrete physical nouns.
 - Output ONLY the valid JSON object. No markdown fences, no preamble.`;
 
   const raw = await callGroq([
@@ -403,6 +409,10 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
     .map((sec: any, i: number) => ({
       id: startId + i, // force sequential ids, the model sometimes gets them wrong
       narration: String(sec?.narration || "").trim(),
+      visual_intent: sec?.visual_intent ? String(sec.visual_intent).trim() : undefined,
+      queries: Array.isArray(sec?.queries) && sec.queries.length > 0
+        ? sec.queries.map((q: any) => String(q).trim()).filter(Boolean)
+        : undefined,
       visual_keywords:
         Array.isArray(sec?.visual_keywords) && sec.visual_keywords.length > 0
           ? Array.from(new Set(sec.visual_keywords.slice(0, 5).map((k: any) => String(k).trim()).filter(Boolean)))
@@ -411,6 +421,10 @@ ${isLast ? `- Section ${startId + count - 1} (CONCLUSION): Provide a powerful ph
         ? sec.section_type
         : "broll",
       key_point: sec?.key_point ? String(sec.key_point).slice(0, 75).trim() : null,
+      stat_number: sec?.stat_number ? String(sec.stat_number).slice(0, 30).trim() : null,
+      stat_label: sec?.stat_label ? String(sec.stat_label).slice(0, 60).trim() : null,
+      document_headline: sec?.document_headline ? String(sec.document_headline).slice(0, 80).trim() : null,
+      highlighted_quote: sec?.highlighted_quote ? String(sec.highlighted_quote).slice(0, 160).trim() : null,
       chapter_title: sec?.chapter_title ? String(sec.chapter_title).slice(0, 60).trim() : null,
       location_stamp: sec?.location_stamp ? String(sec.location_stamp).slice(0, 50).trim() : null,
       estimated_words: Number(sec?.estimated_words) || wordsPerSection,

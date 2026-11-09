@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import crypto from "crypto";
 import { getTempDir } from "./tempDir.js";
 const CLIPS_PER_SECTION = 3;
 function createClipTracker() {
@@ -127,6 +128,75 @@ function buildTopicFallbacks(title, section) {
     fallbacks.push(words[0]);
   }
   return fallbacks.filter(Boolean);
+}
+async function searchStoryblocks(keyword, needed, usedIds) {
+  const clips = [];
+  const publicKey = (process.env.STORYBLOCKS_PUBLIC_KEY || "").trim();
+  const privateKey = (process.env.STORYBLOCKS_PRIVATE_KEY || "").trim();
+  if (!publicKey || !privateKey) return clips;
+  try {
+    const expires = Math.floor(Date.now() / 1e3) + 1800;
+    const resource = "/api/v2/videos/search";
+    const hmacKey = privateKey + expires;
+    const hmac = crypto.createHmac("sha256", hmacKey).update(resource).digest("hex");
+    const url = `https://api.storyblocks.com${resource}?APIKEY=${encodeURIComponent(publicKey)}&EXPIRES=${expires}&HMAC=${hmac}&keywords=${encodeURIComponent(keyword)}&project_id=vidrush_solo&user_id=creator_1&results_per_page=12`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2e4);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) {
+      console.warn(`[storyblocks] "${keyword}": HTTP ${res.status}`);
+      return clips;
+    }
+    const data = await res.json();
+    const results = (data.results || []).filter((r) => !usedIds.has(`storyblocks_${r.id}`));
+    for (const item of results) {
+      if (clips.length >= needed) break;
+      const idStr = `storyblocks_${item.id}`;
+      if (usedIds.has(idStr)) continue;
+      let videoUrl = "";
+      try {
+        const dlExpires = Math.floor(Date.now() / 1e3) + 1800;
+        const dlResource = `/api/v2/videos/stock-item/download/${item.id}`;
+        const dlHmacKey = privateKey + dlExpires;
+        const dlHmac = crypto.createHmac("sha256", dlHmacKey).update(dlResource).digest("hex");
+        const dlUrl = `https://api.storyblocks.com${dlResource}?APIKEY=${encodeURIComponent(publicKey)}&EXPIRES=${dlExpires}&HMAC=${dlHmac}&project_id=vidrush_solo&user_id=creator_1`;
+        const dlController = new AbortController();
+        const dlTimer = setTimeout(() => dlController.abort(), 12e3);
+        const dlRes = await fetch(dlUrl, { signal: dlController.signal });
+        clearTimeout(dlTimer);
+        if (dlRes.ok) {
+          const dlData = await dlRes.json();
+          videoUrl = dlData.MP4?._1080p || dlData.MP4?._720p || dlData.MOV?._1080p || dlData.MP4?._2160p || "";
+        }
+      } catch (dlErr) {
+        console.warn(`[storyblocks] Download URL resolution for ${item.id} error:`, dlErr.message);
+      }
+      if (!videoUrl) {
+        videoUrl = item.preview_urls?._720p || item.preview_urls?._480p || item.preview_urls?._360p || "";
+      }
+      if (!videoUrl) continue;
+      usedIds.add(idStr);
+      clips.push({
+        id: item.id,
+        keyword,
+        thumbUrl: item.thumbnail_url || item.preview_urls?._180p || "",
+        videoUrl,
+        source: "storyblocks",
+        externalId: idStr,
+        duration: item.duration || 10,
+        license: "Storyblocks Commercial License",
+        sourceUrl: `https://www.storyblocks.com/video/stock/${item.id}`,
+        status: "pending"
+      });
+    }
+    if (clips.length > 0) {
+      console.log(`[storyblocks] Sourced ${clips.length} commercial clip(s) for "${keyword}"`);
+    }
+  } catch (err) {
+    console.warn(`[storyblocks] Error querying "${keyword}":`, err.message);
+  }
+  return clips;
 }
 async function searchPexels(keyword, needed, usedIds) {
   const clips = [];
@@ -366,8 +436,15 @@ async function findMultipleFootage(section, limit, videoId, usedIds, title) {
   const isHistorical = visualType === "ARCHIVAL_PHOTO" || topicLower.includes("history") || topicLower.includes("war") || topicLower.includes("empire") || topicLower.includes("coup") || topicLower.includes("19") || topicLower.includes("20");
   for (const kw of keywordsToTry) {
     if (clips.length >= clipsNeeded) break;
-    const pexelsFound = await searchPexels(kw, 1, usedIds);
-    clips.push(...pexelsFound);
+    const storyblocksFound = await searchStoryblocks(kw, 2, usedIds);
+    clips.push(...storyblocksFound);
+  }
+  if (clips.length < clipsNeeded) {
+    for (const kw of keywordsToTry) {
+      if (clips.length >= clipsNeeded) break;
+      const pexelsFound = await searchPexels(kw, 1, usedIds);
+      clips.push(...pexelsFound);
+    }
   }
   if (clips.length < clipsNeeded) {
     for (const kw of keywordsToTry) {

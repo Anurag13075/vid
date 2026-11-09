@@ -66,7 +66,7 @@ export interface Clip {
   keyword: string;
   thumbUrl: string;
   videoUrl?: string;
-  source?: "pexels" | "pixabay" | "wikimedia" | "nasa" | "archive" | "graphic";
+  source?: "storyblocks" | "pexels" | "pixabay" | "wikimedia" | "nasa" | "archive" | "pollinations" | "graphic";
   externalId?: string;
   duration?: number;
   localPath?: string;
