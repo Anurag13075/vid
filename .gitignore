@@ -43,6 +43,8 @@ data/videos/*/pipeline-state.json
 !data/videos/demo/final.mp4
 *.mp3
 *.wav
+!assets/sfx/*.wav
+!public/sfx/*.wav
 !src/assets/*.jpg
 !src/assets/*.png
 server/.env

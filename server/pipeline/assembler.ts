@@ -526,11 +526,71 @@ async function mergeAudio(
   ], options);
 }
 
+// ─── Forensic Documentary SFX Stems Composite ─────────────────────────────────
+async function buildCompositeSfxTrack(
+  sections: Section[],
+  sectionTimings: SectionTiming[],
+  totalDuration: number,
+  outPath: string,
+  options?: { videoId?: string; signal?: AbortSignal }
+): Promise<boolean> {
+  const sfxDir = path.join(__dirname, "..", "..", "assets", "sfx");
+  const sfxInputs: string[] = [];
+  const filterChains: string[] = [];
+
+  let inputIndex = 0;
+  for (let i = 0; i < sectionTimings.length; i++) {
+    const timing = sectionTimings[i];
+    const sec = sections[i] || ({} as Section);
+    let sfxName = "whoosh.wav";
+    if (sec.visual_type === "STAT_SLAM") sfxName = "braam.wav";
+    else if (sec.visual_type === "EVIDENCE_CARD") sfxName = "paper.wav";
+    else if (sec.visual_type === "ARCHIVAL_PHOTO") sfxName = "shutter.wav";
+    else if (sec.sfx_cue && (await fs.stat(path.join(sfxDir, `${sec.sfx_cue}.wav`)).catch(() => null))) {
+      sfxName = `${sec.sfx_cue}.wav`;
+    } else if (i === 0) {
+      sfxName = "whoosh.wav";
+    } else {
+      continue;
+    }
+
+    const sfxFile = path.join(sfxDir, sfxName);
+    const fileStat = await fs.stat(sfxFile).catch(() => null);
+    if (!fileStat) continue;
+
+    const delayMs = Math.max(0, Math.round(timing.startSec * 1000));
+    sfxInputs.push("-i", sfxFile);
+    filterChains.push(`[${inputIndex}:a]adelay=${delayMs}|${delayMs},volume=0.7[sfx${inputIndex}]`);
+    inputIndex++;
+  }
+
+  if (inputIndex === 0) return false;
+
+  const mixInputs = Array.from({ length: inputIndex }, (_, k) => `[sfx${k}]`).join("");
+  const complexFilter = `${filterChains.join(";")};${mixInputs}amix=inputs=${inputIndex}:dropout_transition=2,volume=1.0[sfxout]`;
+
+  try {
+    await ffmpeg([
+      ...sfxInputs,
+      "-filter_complex", complexFilter,
+      "-map", "[sfxout]",
+      "-t", totalDuration.toFixed(3),
+      "-ar", "44100", "-ac", "2",
+      "-y", outPath
+    ], options);
+    return true;
+  } catch (err: any) {
+    console.warn(`[assembler] SFX composition failed (${err?.message}). Continuing without SFX.`);
+    return false;
+  }
+}
+
 // ─── Final Production Mix (Resilient & Instant Mixing Engine) ─────────────────
 async function finalProductionMix(
   videoPath: string,
   voiceoverPath: string,
   bgmPath: string | null,
+  sfxPath: string | null,
   assPath: string | null,
   outputPath: string,
   videoTitle?: string,
@@ -539,6 +599,7 @@ async function finalProductionMix(
   options?: { videoId?: string; signal?: AbortSignal }
 ): Promise<void> {
   const hasBgm = bgmPath && (await fs.stat(bgmPath).catch(() => null))?.size;
+  const hasSfx = sfxPath && (await fs.stat(sfxPath).catch(() => null))?.size;
   const hasAss = assPath && (await fs.stat(assPath).catch(() => null))?.size;
   const voDur = await getExactDuration(voiceoverPath).catch(() => 600);
   const caps = getFFmpegCapabilities();
@@ -549,12 +610,41 @@ async function finalProductionMix(
   const partOutput = outputPath + ".part.mp4";
   await fs.unlink(partOutput).catch(() => {});
 
-  // Step A: Master final audio (Voiceover + BGM) with explicit duration stop
+  // Step A: Master final audio (Voiceover + BGM + SFX) with explicit duration stop
   const masteredAudio = outputPath + ".audio.aac";
   await fs.unlink(masteredAudio).catch(() => {});
 
   try {
-    if (hasBgm && bgmPath) {
+    if (hasBgm && bgmPath && hasSfx && sfxPath) {
+      const fadeOutStart = Math.max(voDur - 2.5, 0);
+      console.log(`[assembler] Mastering voiceover + BGM + SFX stems (duration: ${voDur.toFixed(1)}s)...`);
+      const hasDucking = caps.filters.has("sidechaincompress");
+      const musicVolume = hasDucking ? "0.22" : "0.09";
+      const mixFilters = hasDucking
+        ? [
+          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musicVolume},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
+          `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+          `[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.85[sfx]`,
+          `[bgm][vo]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[ducked]`,
+          `[vo][ducked][sfx]amix=inputs=3:duration=first:dropout_transition=2${broadcastVoiceChain}[audio]`,
+        ]
+        : [
+          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musicVolume},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(2)}:d=2.0[bgm]`,
+          `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+          `[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.85[sfx]`,
+          `[vo][bgm][sfx]amix=inputs=3:duration=first:dropout_transition=2${broadcastVoiceChain}[audio]`,
+        ];
+      await ffmpeg([
+        "-i", voiceoverPath,
+        "-stream_loop", "-1", "-i", bgmPath,
+        "-i", sfxPath,
+        "-filter_complex", mixFilters.join(";"),
+        "-map", "[audio]",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-t", voDur.toFixed(3),
+        "-y", masteredAudio,
+      ], options);
+    } else if (hasBgm && bgmPath) {
       const fadeOutStart = Math.max(voDur - 2.5, 0);
       console.log(`[assembler] Mastering voiceover + background music (duration: ${voDur.toFixed(1)}s)...`);
       const hasDucking = caps.filters.has("sidechaincompress");
@@ -580,6 +670,22 @@ async function finalProductionMix(
         "-t", voDur.toFixed(3),
         "-y", masteredAudio,
       ], options);
+    } else if (hasSfx && sfxPath) {
+      console.log(`[assembler] Mastering voiceover + SFX stems (duration: ${voDur.toFixed(1)}s)...`);
+      const mixFilters = [
+        `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.05[vo]`,
+        `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.85[sfx]`,
+        `[vo][sfx]amix=inputs=2:duration=first:dropout_transition=2${broadcastVoiceChain}[audio]`,
+      ];
+      await ffmpeg([
+        "-i", voiceoverPath,
+        "-i", sfxPath,
+        "-filter_complex", mixFilters.join(";"),
+        "-map", "[audio]",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-t", voDur.toFixed(3),
+        "-y", masteredAudio,
+      ], options);
     } else {
       console.log(`[assembler] Direct voiceover mastering (duration: ${voDur.toFixed(1)}s)...`);
       await ffmpeg([
@@ -591,7 +697,7 @@ async function finalProductionMix(
       ], options);
     }
   } catch (audioErr: any) {
-    console.warn(`[assembler] BGM audio mixing failed (${audioErr.message}). Falling back to direct voiceover...`);
+    console.warn(`[assembler] Audio mixing failed (${audioErr.message}). Falling back to direct voiceover...`);
     await ffmpeg([
       "-i", voiceoverPath,
       ...(broadcastVoiceChain ? ["-af", broadcastVoiceChain.slice(1)] : []),
@@ -994,11 +1100,21 @@ export async function assemble(
   // ── Step 6: Master Audio & Final Video Render ─────────────────────────────
   if (signal?.aborted) throw new Error("Assembly cancelled by user");
   await onProgress(5, total, RENDER_STEPS[5].label);
+
+  const sfxPath = path.join(tmpDir, "sfx_composite.wav");
+  let sfxExists = false;
+  try {
+    sfxExists = await buildCompositeSfxTrack(sections, sectionTimings, audioDuration, sfxPath, opts);
+  } catch (sfxErr: any) {
+    console.warn(`[assembler] SFX generation error: ${sfxErr?.message}`);
+  }
+
   const finalMp4 = path.join(outputDir, "final.mp4");
   await finalProductionMix(
     syncedVideo,
     mergedAudio,
     bgmPath,
+    sfxExists ? sfxPath : null,
     assExists ? assPath : null,
     finalMp4,
     videoTitle,

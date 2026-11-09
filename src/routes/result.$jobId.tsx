@@ -2,6 +2,8 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Logo } from "@/components/Logo";
 import { useJob } from "@/lib/usePipeline";
+import { DocumentaryPlayerView } from "@/remotion/PlayerView";
+import { DocumentaryCompositionProps, RemotionScene } from "@/remotion/types";
 import {
   Check,
   Copy,
@@ -274,6 +276,66 @@ export function ResultPage() {
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(290);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [useRemotionStudio, setUseRemotionStudio] = useState<boolean>(false);
+
+  const remotionProps: DocumentaryCompositionProps = useMemo(() => {
+    const rawSections = scriptData?.sections || [];
+    const scenes: RemotionScene[] = rawSections.map((s: any, idx: number) => {
+      const durSec = s.duration || 6;
+      const visualType = s.visual_type || (idx % 3 === 1 ? "STAT_SLAM" : idx % 3 === 2 ? "EVIDENCE_CARD" : "ARCHIVAL_PHOTO");
+      return {
+        id: `scene-${s.id || idx}`,
+        visual_type: visualType,
+        mediaUrl: s.visual_url || (job.clips?.[idx]?.videoUrl) || "https://images.pexels.com/photos/2156881/pexels-photo-2156881.jpeg",
+        durationInSeconds: durSec,
+        durationInFrames: Math.round(durSec * 30),
+        narration: s.narration || "",
+        stat_number: s.stat_number || "$4.2 BILLION",
+        stat_label: s.stat_label || s.title || "KEY EVIDENCE METRIC",
+        document_headline: s.document_headline || s.title || "EXECUTIVE ARCHIVE MEMO",
+        highlighted_quote: s.highlighted_quote || s.narration,
+        sfx_cue: visualType === "STAT_SLAM" ? "braam" : visualType === "EVIDENCE_CARD" ? "paper" : visualType === "ARCHIVAL_PHOTO" ? "shutter" : "whoosh",
+      };
+    });
+    return {
+      title: job.title || "Documentary Masterpiece",
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      aspectRatio: "2.35:1",
+      scenes: scenes.length > 0 ? scenes : [
+        {
+          id: "demo-1",
+          visual_type: "ARCHIVAL_PHOTO",
+          durationInSeconds: 6,
+          durationInFrames: 180,
+          narration: "A comprehensive visual investigation into uncharted history.",
+          mediaUrl: "https://images.pexels.com/photos/2156881/pexels-photo-2156881.jpeg",
+          sfx_cue: "whoosh",
+        },
+        {
+          id: "demo-2",
+          visual_type: "STAT_SLAM",
+          durationInSeconds: 5,
+          durationInFrames: 150,
+          narration: "Billions of dollars unaccounted for in government records.",
+          stat_number: "$4.2 BILLION",
+          stat_label: "FUNDS UNACCOUNTED FOR IN FEDERAL AUDIT",
+          sfx_cue: "braam",
+        },
+        {
+          id: "demo-3",
+          visual_type: "EVIDENCE_CARD",
+          durationInSeconds: 6,
+          durationInFrames: 180,
+          narration: "The declassified document carried one instruction: do not disclose.",
+          document_headline: "EXECUTIVE MEMORANDUM 94-B",
+          highlighted_quote: "Under no circumstances should external auditors review ledger 7.",
+          sfx_cue: "paper",
+        }
+      ],
+    };
+  }, [scriptData, job]);
 
   // ─── Real-Time Parts Management ───────────────────────────────────────────
   const [parts, setParts] = useState<VideoPart[]>([
@@ -1137,124 +1199,163 @@ export function ResultPage() {
           </div>
         )}
 
-        {/* ─── Master Interactive Video Player ─── */}
-        <div
-          className={`relative rounded-3xl overflow-hidden border border-white/[0.09] bg-black shadow-[0_30px_100px_-20px_rgba(139,92,246,0.25)] transition-all duration-500 mx-auto ${
-            aspectRatio === "9:16"
-              ? "max-w-sm aspect-[9/16]"
-              : aspectRatio === "21:9"
-              ? "aspect-[21/9]"
-              : aspectRatio === "1:1"
-              ? "max-w-xl aspect-square"
-              : "aspect-video"
-          }`}
-        >
-          {!videoUrl && !isDemo && job.stage !== "done" ? (
-            <div className="w-full h-full min-h-[380px] flex flex-col items-center justify-center p-8 text-center bg-zinc-950/90">
-              <Loader2 className="w-10 h-10 animate-spin text-purple-400 mb-4" />
-              <h3 className="text-lg font-semibold text-white">Video Rendering in Progress ({job.progress || 0}%)</h3>
-              <p className="text-sm text-zinc-400 mt-2 max-w-md">{job.message || "Generating script, voiceover audio, and visual scene cuts..."}</p>
-              <Link
-                to="/generate/$jobId"
-                params={{ jobId }}
-                className="mt-5 px-4 py-2 bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 rounded-lg text-xs font-mono transition-colors"
-              >
-                Open Live Pipeline Dashboard →
-              </Link>
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              key={videoUrl}
-              src={videoUrl}
-              controls
-              playsInline
-              preload="auto"
-              poster={job.thumbnailUrl || (isDemo ? "/videos/demo/thumb.jpg" : undefined)}
-              className="w-full h-full object-cover transition-all duration-500 ease-out"
-              style={{
-                filter: activeGradeObj.filter,
-                transform: `scale(${zoomScale})`,
-              }}
-            />
-          )}
-
-          {/* Real-Time Radial Vignette Layer */}
-          {hasVignette && (
-            <div
-              className="absolute inset-0 pointer-events-none transition-opacity duration-300"
-              style={{
-                background:
-                  "radial-gradient(circle at center, transparent 55%, rgba(0,0,0,0.85) 100%)",
-              }}
-            />
-          )}
-
-          {/* Real-Time 35mm Film Grain Overlay */}
-          {hasFilmGrain && (
-            <div
-              className="absolute inset-0 pointer-events-none opacity-20 mix-blend-screen"
-              style={{
-                backgroundImage:
-                  "url('data:image/svg+xml;utf8,<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\"><filter id=\"noiseFilter\"><feTurbulence type=\"fractalNoise\" baseFrequency=\"0.8\" numOctaves=\"3\" stitchTiles=\"stitch\"/></filter><rect width=\"100%\" height=\"100%\" filter=\"url(%23noiseFilter)\"/></svg>')",
-              }}
-            />
-          )}
-
-          {/* ─── Real-Time Synchronized Karaoke Subtitles Overlay ─── */}
-          {showSubtitles && currentSubtitle && (
-            <div className="absolute bottom-16 left-6 right-6 pointer-events-none flex justify-center z-20">
-              <div className="px-5 py-2.5 rounded-2xl bg-black/85 backdrop-blur-md border border-white/10 text-center max-w-2xl shadow-2xl animate-fade-in">
-                <p className="text-[14px] sm:text-[16px] font-medium text-white tracking-wide leading-relaxed drop-shadow-md">
-                  "{currentSubtitle}"
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* ─── Real-Time Wispr Flow On-Screen HUD Notification ─── */}
-          {hudNotification && (
-            <div className="absolute top-5 left-1/2 -translate-x-1/2 max-w-[92%] px-5 py-2.5 rounded-full bg-[#0c0c14]/95 backdrop-blur-2xl border border-purple-500/60 text-white text-[13px] font-medium flex items-center gap-3 shadow-[0_10px_40px_rgba(0,0,0,0.8)] z-30 animate-fade-in">
-              <div className="flex items-center gap-1.5 text-purple-400 font-semibold shrink-0">
-                <Mic className="h-4 w-4 animate-pulse text-purple-400" />
-                <span>Wispr Flow:</span>
-              </div>
-              <span className="text-purple-200 italic font-mono truncate max-w-xs">
-                "{hudNotification.dictated}"
-              </span>
-              <span className="h-3 w-[1px] bg-white/20 shrink-0" />
-              <span className="text-emerald-300 font-semibold shrink-0">
-                {hudNotification.action}
-              </span>
-            </div>
-          )}
-
-          {/* Active Preset Metadata Badges */}
-          <div className="absolute bottom-4 left-4 flex flex-wrap gap-2 pointer-events-none z-10">
-            {colorGrade !== "none" && (
-              <div
-                className={`px-2.5 py-1 rounded-md text-[11px] font-mono backdrop-blur border uppercase flex items-center gap-1.5 ${activeGradeObj.badgeColor}`}
-              >
-                <Palette className="h-3 w-3" /> {activeGradeObj.label}
-              </div>
-            )}
-            {aspectRatio !== "16:9" && (
-              <div className="px-2.5 py-1 rounded-md bg-black/75 backdrop-blur text-[11px] font-mono text-purple-300 border border-purple-500/30 uppercase flex items-center gap-1.5">
-                <Maximize2 className="h-3 w-3" /> {aspectRatio}
-              </div>
-            )}
-            {zoomScale > 1.0 && (
-              <div className="px-2.5 py-1 rounded-md bg-black/75 backdrop-blur text-[11px] font-mono text-purple-300 border border-purple-500/30 flex items-center gap-1.5">
-                <Camera className="h-3 w-3" /> Zoom: {zoomScale}x
-              </div>
-            )}
-            {playbackSpeed !== 1.0 && (
-              <div className="px-2.5 py-1 rounded-md bg-black/75 backdrop-blur text-[11px] font-mono text-amber-300 border border-amber-500/30 flex items-center gap-1.5">
-                <Zap className="h-3 w-3" /> {playbackSpeed}x Speed
-              </div>
-            )}
+        {/* ─── Video Engine Selector (Rendered MP4 vs Remotion 2.35:1 Studio) ─── */}
+        <div className="flex items-center justify-between mb-4 max-w-4xl mx-auto">
+          <div className="flex items-center gap-2 p-1 bg-zinc-900/80 border border-white/10 rounded-xl">
+            <button
+              onClick={() => setUseRemotionStudio(false)}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                !useRemotionStudio
+                  ? "bg-purple-600 text-white shadow-md shadow-purple-600/30"
+                  : "text-zinc-400 hover:text-white"
+              }`}
+            >
+              🎬 Rendered MP4
+            </button>
+            <button
+              onClick={() => setUseRemotionStudio(true)}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                useRemotionStudio
+                  ? "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/30"
+                  : "text-zinc-400 hover:text-white"
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
+              Remotion 2.35:1 Live Studio
+            </button>
           </div>
+          {useRemotionStudio && (
+            <span className="text-[11px] font-mono text-purple-300 bg-purple-950/70 border border-purple-500/40 px-3 py-1 rounded-full flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              Spring Keyframe Engine · Live Browser Timeline
+            </span>
+          )}
         </div>
+
+        {useRemotionStudio ? (
+          <div className="mb-6 max-w-4xl mx-auto">
+            <DocumentaryPlayerView props={remotionProps} autoPlay={false} />
+          </div>
+        ) : (
+          /* ─── Master Interactive Video Player ─── */
+          <div
+            className={`relative rounded-3xl overflow-hidden border border-white/[0.09] bg-black shadow-[0_30px_100px_-20px_rgba(139,92,246,0.25)] transition-all duration-500 mx-auto ${
+              aspectRatio === "9:16"
+                ? "max-w-sm aspect-[9/16]"
+                : aspectRatio === "21:9"
+                ? "aspect-[21/9]"
+                : aspectRatio === "1:1"
+                ? "max-w-xl aspect-square"
+                : "aspect-video"
+            }`}
+          >
+            {!videoUrl && !isDemo && job.stage !== "done" ? (
+              <div className="w-full h-full min-h-[380px] flex flex-col items-center justify-center p-8 text-center bg-zinc-950/90">
+                <Loader2 className="w-10 h-10 animate-spin text-purple-400 mb-4" />
+                <h3 className="text-lg font-semibold text-white">Video Rendering in Progress ({job.progress || 0}%)</h3>
+                <p className="text-sm text-zinc-400 mt-2 max-w-md">{job.message || "Generating script, voiceover audio, and visual scene cuts..."}</p>
+                <Link
+                  to="/generate/$jobId"
+                  params={{ jobId }}
+                  className="mt-5 px-4 py-2 bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 rounded-lg text-xs font-mono transition-colors"
+                >
+                  Open Live Pipeline Dashboard →
+                </Link>
+              </div>
+            ) : (
+              <video
+                ref={videoRef}
+                key={videoUrl}
+                src={videoUrl}
+                controls
+                playsInline
+                preload="auto"
+                poster={job.thumbnailUrl || (isDemo ? "/videos/demo/thumb.jpg" : undefined)}
+                className="w-full h-full object-cover transition-all duration-500 ease-out"
+                style={{
+                  filter: activeGradeObj.filter,
+                  transform: `scale(${zoomScale})`,
+                }}
+              />
+            )}
+
+            {/* Real-Time Radial Vignette Layer */}
+            {hasVignette && (
+              <div
+                className="absolute inset-0 pointer-events-none transition-opacity duration-300"
+                style={{
+                  background:
+                    "radial-gradient(circle at center, transparent 55%, rgba(0,0,0,0.85) 100%)",
+                }}
+              />
+            )}
+
+            {/* Real-Time 35mm Film Grain Overlay */}
+            {hasFilmGrain && (
+              <div
+                className="absolute inset-0 pointer-events-none opacity-20 mix-blend-screen"
+                style={{
+                  backgroundImage:
+                    "url('data:image/svg+xml;utf8,<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\"><filter id=\"noiseFilter\"><feTurbulence type=\"fractalNoise\" baseFrequency=\"0.8\" numOctaves=\"3\" stitchTiles=\"stitch\"/></filter><rect width=\"100%\" height=\"100%\" filter=\"url(%23noiseFilter)\"/></svg>')",
+                }}
+              />
+            )}
+
+            {/* ─── Real-Time Synchronized Karaoke Subtitles Overlay ─── */}
+            {showSubtitles && currentSubtitle && (
+              <div className="absolute bottom-16 left-6 right-6 pointer-events-none flex justify-center z-20">
+                <div className="px-5 py-2.5 rounded-2xl bg-black/85 backdrop-blur-md border border-white/10 text-center max-w-2xl shadow-2xl animate-fade-in">
+                  <p className="text-[14px] sm:text-[16px] font-medium text-white tracking-wide leading-relaxed drop-shadow-md">
+                    "{currentSubtitle}"
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* ─── Real-Time Wispr Flow On-Screen HUD Notification ─── */}
+            {hudNotification && (
+              <div className="absolute top-5 left-1/2 -translate-x-1/2 max-w-[92%] px-5 py-2.5 rounded-full bg-[#0c0c14]/95 backdrop-blur-2xl border border-purple-500/60 text-white text-[13px] font-medium flex items-center gap-3 shadow-[0_10px_40px_rgba(0,0,0,0.8)] z-30 animate-fade-in">
+                <div className="flex items-center gap-1.5 text-purple-400 font-semibold shrink-0">
+                  <Mic className="h-4 w-4 animate-pulse text-purple-400" />
+                  <span>Wispr Flow:</span>
+                </div>
+                <span className="text-purple-200 italic font-mono truncate max-w-xs">
+                  "{hudNotification.dictated}"
+                </span>
+                <span className="h-3 w-[1px] bg-white/20 shrink-0" />
+                <span className="text-emerald-300 font-semibold shrink-0">
+                  {hudNotification.action}
+                </span>
+              </div>
+            )}
+
+            {/* Active Preset Metadata Badges */}
+            <div className="absolute bottom-4 left-4 flex flex-wrap gap-2 pointer-events-none z-10">
+              {colorGrade !== "none" && (
+                <div
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-mono backdrop-blur border uppercase flex items-center gap-1.5 ${activeGradeObj.badgeColor}`}
+                >
+                  <Palette className="h-3 w-3" /> {activeGradeObj.label}
+                </div>
+              )}
+              {aspectRatio !== "16:9" && (
+                <div className="px-2.5 py-1 rounded-md bg-black/75 backdrop-blur text-[11px] font-mono text-purple-300 border border-purple-500/30 uppercase flex items-center gap-1.5">
+                  <Maximize2 className="h-3 w-3" /> {aspectRatio}
+                </div>
+              )}
+              {zoomScale > 1.0 && (
+                <div className="px-2.5 py-1 rounded-md bg-black/75 backdrop-blur text-[11px] font-mono text-purple-300 border border-purple-500/30 flex items-center gap-1.5">
+                  <Camera className="h-3 w-3" /> Zoom: {zoomScale}x
+                </div>
+              )}
+              {playbackSpeed !== 1.0 && (
+                <div className="px-2.5 py-1 rounded-md bg-black/75 backdrop-blur text-[11px] font-mono text-amber-300 border border-amber-500/30 flex items-center gap-1.5">
+                  <Zap className="h-3 w-3" /> {playbackSpeed}x Speed
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* ─── Professional Live Action Bar ─── */}
         <div className="mt-5 flex flex-wrap items-center justify-between gap-4">

@@ -468,6 +468,23 @@ export async function findMultipleFootage(
     }
   }
 
+  // Phase 6: Bespoke Documentary AI Generation via Pollinations (Zero-Cost Flux)
+  if (clips.length < clipsNeeded && (section.visual_type === "ARCHIVAL_PHOTO" || section.visual_type === "B_ROLL" || section.visual_type === "DOC_CLIP")) {
+    const aiPrompt = section.visual_intent || section.narration.slice(0, 120);
+    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(aiPrompt + ", 1980s 35mm photo, authentic documentary archive, cinematic chiaroscuro lighting, anamorphic lens, realistic texture, 35mm grain, highly detailed historical look")}?width=1920&height=1080&nologo=true&model=flux`;
+    clips.push({
+      id: section.id * 1000 + 1,
+      keyword: aiPrompt,
+      thumbUrl: pollinationsUrl,
+      videoUrl: pollinationsUrl,
+      source: "pollinations",
+      externalId: `pollinations_${section.id}`,
+      duration: 8,
+      license: "Public Domain / AI Generated Documentary",
+      status: "pending",
+    });
+  }
+
   // Quality Gate: If 0 clips found, never show unrelated filler - route to procedural graphic!
   if (clips.length === 0) {
     console.log(`[quality-gate] Section ${section.id}: routing to procedural editorial graphic`);
@@ -529,7 +546,7 @@ export async function downloadClip(
   const tmpDir = getTempDir(videoId);
   await fs.mkdir(tmpDir, { recursive: true });
 
-  const isImg = clip.externalId.includes("_photo_") || /\.(jpe?g|png|webp|avif)(\?|$)/i.test(clip.videoUrl);
+  const isImg = clip.externalId.includes("_photo_") || /\.(jpe?g|png|webp|avif)(\?|$)/i.test(clip.videoUrl) || clip.source === "pollinations" || clip.source === "wikimedia";
   const ext = isImg ? "jpg" : "mp4";
   const outPath = path.join(tmpDir, `${suffix}.${ext}`);
   if (!clip.videoUrl) throw new Error("Clip has no videoUrl");
