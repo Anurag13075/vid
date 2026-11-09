@@ -150,7 +150,17 @@ app.get("/api/pipeline/:id/status", async (req, res) => {
 });
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, ts: Date.now() });
+  res.json({
+    ok: true,
+    ts: Date.now(),
+    providers: {
+      storyblocks: Boolean(process.env.STORYBLOCKS_PUBLIC_KEY && process.env.STORYBLOCKS_PRIVATE_KEY),
+      elevenlabs: Boolean(process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_LABS_API_KEY),
+      pexels: Boolean(process.env.PEXELS_API_KEY),
+      pixabay: Boolean(process.env.PIXABAY_API_KEY),
+      groq: Boolean(process.env.GROQ_API_KEY || process.env.GROK_API_KEY),
+    },
+  });
 });
 
 // ── Frontend SPA static serving ───────────────────────────────────────────────
