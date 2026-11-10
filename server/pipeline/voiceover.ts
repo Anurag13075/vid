@@ -94,68 +94,77 @@ function cleanNarrationText(text: string): string {
 
 // ─── Microsoft Edge Neural TTS (Pure Node.js WebSocket + CLI Fallback) ──────
 async function generateEdgeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
-  const edgeVoice = EDGE_VOICE_MAP[voiceId] || (MALE_VOICES.has(voiceId) ? "en-US-ChristopherNeural" : "en-US-AriaNeural");
+  const isMale = MALE_VOICES.has(voiceId);
+  const primaryEdgeVoice = EDGE_VOICE_MAP[voiceId] || (isMale ? "en-US-BrianNeural" : "en-US-AriaNeural");
 
-  // Attempt 1: Native pure Node.js msedge-tts client (zero Python/CLI dependency)
-  try {
-    const { MsEdgeTTS, OUTPUT_FORMAT } = await import("msedge-tts");
-    const tts = new MsEdgeTTS();
-    await tts.setMetadata(edgeVoice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
-    const tmpDir = path.dirname(outputPath);
-    const subTmp = path.join(tmpDir, `edge_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
-    await fs.mkdir(subTmp, { recursive: true });
-    const res = await tts.toFile(subTmp, text);
-    if (res?.audioFilePath && fsSync.existsSync(res.audioFilePath)) {
-      const stat = await fs.stat(res.audioFilePath);
-      if (stat.size > 500) {
-        await fs.copyFile(res.audioFilePath, outputPath);
-        await fs.rm(subTmp, { recursive: true, force: true }).catch(() => {});
-        return; // Success!
-      }
-    }
-    await fs.rm(subTmp, { recursive: true, force: true }).catch(() => {});
-  } catch (nodeErr: any) {
-    console.warn(`[tts] Native msedge-tts failed (${nodeErr.message}), trying CLI fallback...`);
-  }
+  // Strict Gender & Timbre Preservation: NEVER mix male and female voices within a video!
+  const voiceCandidates = isMale
+    ? [primaryEdgeVoice, "en-US-BrianNeural", "en-US-ChristopherNeural", "en-US-GuyNeural", "en-US-EricNeural", "en-GB-RyanNeural"]
+    : [primaryEdgeVoice, "en-US-AriaNeural", "en-US-AvaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural"];
 
-  // Attempt 2: CLI candidates (edge-tts Python binary if installed)
-  const tempTextFile = outputPath + ".txt";
-  await fs.writeFile(tempTextFile, text, "utf8");
+  const uniqueCandidates = Array.from(new Set(voiceCandidates));
 
-  const candidates: { cmd: string; args: string[] }[] = [
-    { cmd: "edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
-    { cmd: "python3", args: ["-m", "edge_tts", "--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
-    { cmd: "/usr/local/bin/edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
-    { cmd: "/usr/bin/edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
-    { cmd: "python", args: ["-m", "edge_tts", "--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
-  ];
-
-  let lastError: Error | null = null;
-  for (const c of candidates) {
+  for (const edgeVoice of uniqueCandidates) {
+    // Attempt 1: Native msedge-tts client
     try {
-      await new Promise<void>((resolve, reject) => {
-        const proc = spawn(c.cmd, c.args, { stdio: ["ignore", "pipe", "pipe"] });
-        let stderr = "";
-        proc.stderr.on("data", (d) => { stderr += d.toString(); });
-        proc.on("close", (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`${c.cmd} exited with code ${code}: ${stderr}`));
-        });
-        proc.on("error", (err) => reject(err));
-      });
-
-      const stat = await fs.stat(outputPath).catch(() => null);
-      if (stat && stat.size > 500) {
-        await fs.unlink(tempTextFile).catch(() => {});
-        return; // Success!
+      const { MsEdgeTTS, OUTPUT_FORMAT } = await import("msedge-tts");
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(edgeVoice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+      const tmpDir = path.dirname(outputPath);
+      const subTmp = path.join(tmpDir, `edge_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+      await fs.mkdir(subTmp, { recursive: true });
+      const res = await tts.toFile(subTmp, text);
+      const generatedFile = res?.audioFilePath || path.join(subTmp, "audio.mp3");
+      if (fsSync.existsSync(generatedFile)) {
+        const stat = await fs.stat(generatedFile);
+        if (stat.size > 500) {
+          await fs.copyFile(generatedFile, outputPath);
+          await fs.rm(subTmp, { recursive: true, force: true }).catch(() => {});
+          return; // Success!
+        }
       }
-    } catch (err: any) {
-      lastError = err;
+      await fs.rm(subTmp, { recursive: true, force: true }).catch(() => {});
+    } catch (nodeErr: any) {
+      console.warn(`[tts] msedge-tts (${edgeVoice}) attempt failed: ${nodeErr.message}`);
     }
+
+    // Attempt 2: CLI candidates (edge-tts Python binary)
+    const tempTextFile = outputPath + ".txt";
+    await fs.writeFile(tempTextFile, text, "utf8");
+
+    const candidates: { cmd: string; args: string[] }[] = [
+      { cmd: "edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+      { cmd: "python3", args: ["-m", "edge_tts", "--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+      { cmd: "/usr/local/bin/edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+      { cmd: "/usr/bin/edge-tts", args: ["--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+      { cmd: "python", args: ["-m", "edge_tts", "--voice", edgeVoice, "--file", tempTextFile, "--write-media", outputPath] },
+    ];
+
+    for (const c of candidates) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const proc = spawn(c.cmd, c.args, { stdio: ["ignore", "pipe", "pipe"] });
+          let stderr = "";
+          proc.stderr.on("data", (d) => { stderr += d.toString(); });
+          proc.on("close", (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(`${c.cmd} exited with code ${code}: ${stderr}`));
+          });
+          proc.on("error", (err) => reject(err));
+        });
+
+        const stat = await fs.stat(outputPath).catch(() => null);
+        if (stat && stat.size > 500) {
+          await fs.unlink(tempTextFile).catch(() => {});
+          return; // Success!
+        }
+      } catch {}
+    }
+
+    await fs.unlink(tempTextFile).catch(() => {});
   }
 
-  await fs.unlink(tempTextFile).catch(() => {});
-  throw lastError || new Error("All Edge TTS candidates failed");
+  throw new Error(`All neural TTS candidates for voice ${voiceId} failed`);
 }
 
 // ─── ElevenLabs TTS Generation ──────────────────────────────────────────────
@@ -210,59 +219,6 @@ async function generateElevenLabsTTS(
   }
 }
 
-// ─── Clean Spoken TTS Fallback (with Male/Female Timbre Conditioning) ────────
-async function generateFreeTTS(text: string, voiceId: string, outputPath: string): Promise<void> {
-  const isMale = MALE_VOICES.has(voiceId);
-  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
-  const chunks: string[] = [];
-  let cur = "";
-
-  for (const s of sentences) {
-    const trimmed = s.trim();
-    if (!trimmed) continue;
-    if ((cur + " " + trimmed).length <= 150) {
-      cur += (cur ? " " : "") + trimmed;
-    } else {
-      if (cur) chunks.push(cur);
-      cur = trimmed;
-    }
-  }
-  if (cur) chunks.push(cur);
-
-  const buffers: Buffer[] = [];
-  for (const chunk of chunks) {
-    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=en&client=tw-ob`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-    });
-    if (!res.ok) throw new Error(`Free TTS error ${res.status}`);
-    const ab = await res.arrayBuffer();
-    buffers.push(Buffer.from(ab));
-  }
-
-  const rawAudio = Buffer.concat(buffers);
-  const tmpRaw = outputPath + ".raw.mp3";
-  await fs.writeFile(tmpRaw, rawAudio);
-
-  // If a male voice was chosen, down-pitch and formant-shift so it NEVER sounds like a female voice!
-  const audioFilters = isMale
-    ? "asetrate=44100*0.82,aresample=44100,atempo=1.22,bass=g=5:f=110,equalizer=f=2400:t=q:w=1:g=-2"
-    : "equalizer=f=3000:t=q:w=1:g=2,treble=g=2";
-
-  await ffmpeg([
-    "-i", tmpRaw,
-    "-af", audioFilters,
-    "-ar", "44100",
-    "-ac", "2",
-    "-c:a", "libmp3lame",
-    "-b:a", "192k",
-    "-y", outputPath,
-  ]);
-  await fs.unlink(tmpRaw).catch(() => {});
-}
-
 // ─── Public API ─────────────────────────────────────────────────────────────
 export async function generateVoiceover(
   section: ScriptSection,
@@ -303,34 +259,23 @@ export async function generateVoiceover(
   }
 
   // 2. Microsoft Edge Neural TTS (Natural human voices: Brian, Christopher, Guy, Aria, etc.)
-  try {
-    console.log(`[tts] Synthesizing natural neural voiceover via Edge-TTS (${voice}) for section ${section.id}...`);
-    await generateEdgeTTS(text, voice, audioPath);
-    const stat = await fs.stat(audioPath).catch(() => null);
-    if (stat && stat.size > 200) {
-      const durationMs = await getAudioDurationMs(audioPath);
-      console.log(`[tts] Edge-TTS complete for section ${section.id}: ${(durationMs / 1000).toFixed(1)}s`);
-      return { audioPath, durationMs };
+  for (let edgeAttempt = 1; edgeAttempt <= 3; edgeAttempt++) {
+    try {
+      console.log(`[tts] Synthesizing natural neural voiceover via Edge-TTS (${voice}) for section ${section.id} (attempt ${edgeAttempt})...`);
+      await generateEdgeTTS(text, voice, audioPath);
+      const stat = await fs.stat(audioPath).catch(() => null);
+      if (stat && stat.size > 200) {
+        const durationMs = await getAudioDurationMs(audioPath);
+        console.log(`[tts] Edge-TTS complete for section ${section.id}: ${(durationMs / 1000).toFixed(1)}s`);
+        return { audioPath, durationMs };
+      }
+    } catch (edgeErr: any) {
+      console.warn(`[tts] Edge-TTS attempt ${edgeAttempt} failed for section ${section.id} (${edgeErr.message})`);
+      if (edgeAttempt < 3) await sleep(1000 * edgeAttempt);
     }
-  } catch (edgeErr: any) {
-    console.warn(`[tts] Edge-TTS fallback failed for section ${section.id} (${edgeErr.message}), trying Free Spoken TTS...`);
   }
 
-  // 3. High-Quality Free Spoken TTS Fallback (with Male/Female audio conditioning)
-  try {
-    console.log(`[tts] Synthesizing spoken voiceover via Free TTS (${voice}) for section ${section.id}...`);
-    await generateFreeTTS(text, voice, audioPath);
-    const stat = await fs.stat(audioPath).catch(() => null);
-    if (stat && stat.size > 200) {
-      const durationMs = await getAudioDurationMs(audioPath);
-      console.log(`[tts] Free TTS complete for section ${section.id}: ${(durationMs / 1000).toFixed(1)}s`);
-      return { audioPath, durationMs };
-    }
-  } catch (freeErr: any) {
-    console.warn(`[tts] Free TTS fallback failed for section ${section.id}:`, freeErr.message);
-  }
-
-  // 4. Fallback: Proportional natural silence pacing
+  // 3. Fallback: Proportional natural silence pacing (NEVER mix random genders)
   const estimatedMs = estimateDuration(text);
   console.log(`[tts] Section ${section.id}: pacing duration set to ${(estimatedMs / 1000).toFixed(1)}s`);
   await generateSilence(audioPath, estimatedMs);
@@ -345,9 +290,6 @@ export async function synthesizeVoicePreview(voiceId: string, text: string): Pro
   const tmpOut = path.join(tmpDir, `preview_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`);
   try {
     await generateEdgeTTS(text, voiceId, tmpOut);
-    return await fs.readFile(tmpOut);
-  } catch {
-    await generateFreeTTS(text, voiceId, tmpOut);
     return await fs.readFile(tmpOut);
   } finally {
     await fs.unlink(tmpOut).catch(() => {});
